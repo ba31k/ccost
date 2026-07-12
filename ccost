@@ -244,6 +244,16 @@ def apply_period(records, idx):
 FULL = "█"
 EIGHTHS = "▏▎▍▌▋▊▉█"
 SPARK = " ▁▂▃▄▅▆▇█"
+SEP = "─"
+
+
+def set_ascii_glyphs():
+    """Фолбэк, когда UTF-8 недоступен: рисуем графику на ASCII, а не на ?."""
+    global FULL, EIGHTHS, SPARK, SEP
+    FULL = "#"
+    EIGHTHS = " .:-=+*#"
+    SPARK = " .:-=+*#@"
+    SEP = "-"
 
 
 def bar(frac, width):
@@ -362,10 +372,6 @@ class App:
 
     # ------------------------------------------------------------ цикл
     def run(self, scr):
-        try:
-            locale.setlocale(locale.LC_ALL, "")
-        except locale.Error:
-            pass
         curses.curs_set(0)
         scr.timeout(-1)
         self._init_colors()
@@ -388,6 +394,7 @@ class App:
             self.c["money"] = curses.A_BOLD
             self.c["bar"] = 0
             self.c["tab"] = curses.A_REVERSE | curses.A_BOLD
+            self.c["sel"] = curses.A_REVERSE | curses.A_BOLD
             return
         curses.start_color()
         try:
@@ -404,6 +411,7 @@ class App:
                 ("money", 71,  bg, 0),                 # зелёный
                 ("bar",   37,  bg, 0),                 # бирюзовый
                 ("tab",   16,  37, curses.A_BOLD),     # тёмный на бирюзе
+                ("sel",   231, 24, curses.A_BOLD),     # выделение: белый на синем
             ]
         else:
             # 8/16 цветов: серого нет — берём белый + A_DIM
@@ -413,6 +421,7 @@ class App:
                 ("money", curses.COLOR_GREEN,  bg, 0),
                 ("bar",   curses.COLOR_CYAN,   bg, 0),
                 ("tab",   curses.COLOR_BLACK,  curses.COLOR_CYAN, curses.A_BOLD),
+                ("sel",   curses.COLOR_WHITE,  curses.COLOR_BLUE, curses.A_BOLD),
             ]
         for i, (name, fg, b, extra) in enumerate(specs, start=1):
             try:
@@ -420,9 +429,11 @@ class App:
                 self.c[name] = curses.color_pair(i) | extra
             except curses.error:
                 self.c[name] = extra
-        # если активная вкладка осталась без цвета — пусть будет инверсия
+        # если пары не создались — держим читаемость через инверсию
         if not self.c["tab"]:
             self.c["tab"] = curses.A_REVERSE | curses.A_BOLD
+        if not self.c["sel"]:
+            self.c["sel"] = curses.A_REVERSE | curses.A_BOLD
 
     def handle(self, ch):
         if ch in (ord("q"), 27):
@@ -480,7 +491,7 @@ class App:
             attr = self.c["tab"] | curses.A_BOLD if i == self.tab else curses.A_DIM
             self.add(scr, 1, x, label, attr)
             x += len(label) + 1
-        self.add(scr, 2, 1, "─" * (maxx - 2), self.c["dim"])
+        self.add(scr, 2, 1, SEP * (maxx - 2), self.c["dim"])
         body_top = 3
         body_h = maxy - body_top - 1
         if not head:
@@ -548,21 +559,26 @@ class App:
         for i in range(off, min(len(rows), off + h_ - 1)):
             k, a = rows[i]
             y = top + 1 + (i - off)
-            rowattr = curses.A_REVERSE if i == sel else 0
+            selected = i == sel
+            if selected:                         # сплошная подсветка на всю ширину
+                self.add(scr, y, 1, " " * (maxx - 2), self.c["sel"])
+            a_txt = self.c["sel"] if selected else 0
+            a_bar = self.c["sel"] if selected else self.c["bar"]
+            a_dim = self.c["sel"] if selected else self.c["dim"]
+            a_mon = self.c["sel"] if selected else self.c["money"]
             if self.tab == 1:
                 name = k.replace("claude-", "")
             elif self.tab == 3:
                 name = self.titles.get(k) or f"({k[:8]})"
             else:
                 name = k
-            self.add(scr, y, 2, f"{name[:namew]:{namew}}", rowattr)
+            mark = "> " if selected else "  "
+            self.add(scr, y, 1, f"{mark}{name}"[:namew + 1].ljust(namew + 1), a_txt)
             bx = 2 + namew + 1
-            self.add(scr, y, bx, bar(tok(a) / mx, 12), self.c["bar"] | rowattr)
+            self.add(scr, y, bx, bar(tok(a) / mx, 12), a_bar)
             self.add(scr, y, maxx - 34,
-                     f"{h(a['tin']):>5}{h(a['cw']):>6}{h(a['tout']):>6}",
-                     (self.c["dim"] if not rowattr else 0) | rowattr)
-            self.add(scr, y, maxx - 13, f"{money(a['cost']):>11}",
-                     (self.c["money"] if not rowattr else 0) | rowattr)
+                     f"{h(a['tin']):>5}{h(a['cw']):>6}{h(a['tout']):>6}", a_dim)
+            self.add(scr, y, maxx - 13, f"{money(a['cost']):>11}", a_mon)
         if len(rows) > h_ - 1:
             self.add(scr, top, maxx - 46, f"[{sel + 1}/{len(rows)}]", self.c["dim"])
 
@@ -590,8 +606,38 @@ def window(sel, n, h_):
 
 # ---------------------------------------------------------------- main
 
+def _codeset():
+    # реальный codeset LC_CTYPE — именно его смотрит ncurses (в отличие от
+    # getpreferredencoding, который на macOS врёт «UTF-8» даже под локалью C)
+    try:
+        return (locale.nl_langinfo(locale.CODESET) or "").upper()
+    except (AttributeError, ValueError):
+        return (locale.getpreferredencoding(False) or "").upper()
+
+
+def setup_output():
+    """Локаль ставим ДО curses.initscr (иначе бары рендерятся как «?»).
+    Пытаемся получить UTF-8; если не вышло — переходим на ASCII-графику."""
+    utf8 = False
+    for loc in ("", "en_US.UTF-8", "C.UTF-8", "en_US.utf8", "C.utf8", "UTF-8"):
+        try:
+            locale.setlocale(locale.LC_ALL, loc)
+        except locale.Error:
+            continue
+        if "UTF" in _codeset().replace("-", ""):
+            utf8 = True
+            break
+    try:                      # текстовый режим: не падать на не-UTF8 stdout
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+    if os.environ.get("CCOST_ASCII") or not utf8:
+        set_ascii_glyphs()
+
+
 def main():
     arg = sys.argv[1] if len(sys.argv) > 1 else ""
+    setup_output()
     records, titles = collect()
     want_text = arg in ("report", "-r", "--report", "text")
     if want_text or not sys.stdout.isatty():
