@@ -1,13 +1,24 @@
 #!/usr/bin/env python3
-"""ccost — сколько токенов и денег (по прайсу API) потрачено во всех сессиях Claude Code.
+"""ccost — статистика токенов и стоимости (по прайсу API) всех сессий Claude Code.
 
 Читает локальные JSONL из ~/.claude/projects/, дедуплицирует вызовы по message.id
-и считает стоимость по стандартному прайсу API. Выводит итог и топ моделей по токенам.
+(иначе resume/fork сессий удваивают цифры) и считает стоимость по прайсу API.
+
+  ccost           — интерактивный TUI (вкладки, периоды, сортировка, графики)
+  ccost report    — полный текстовый отчёт (он же фолбэк для пайпа/не-tty)
+  ccost -r        — то же, что report
 """
+import curses
 import glob
 import json
+import locale
 import os
+import sys
+import time
 from collections import defaultdict
+from datetime import datetime, timezone
+
+# ---------------------------------------------------------------- прайс / цены
 
 # $ за 1M токенов (input, output) — стандартный прайс API
 PRICE = {
@@ -26,25 +37,70 @@ CACHE_READ = 0.10    # чтение из кэша = 0.1× input
 
 ROOT = os.path.expanduser("~/.claude/projects")
 
+TS_FORMATS = ("%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ")
+
+
+def cost_of(model, tin, tout, cw, cr):
+    pin, pout = PRICE.get(model, (0, 0))
+    ci = pin / 1e6
+    return tin * ci + tout * pout / 1e6 + cw * ci * CACHE_WRITE + cr * ci * CACHE_READ
+
+
+def parse_ts(s):
+    if not s:
+        return 0.0
+    for fmt in TS_FORMATS:
+        try:
+            return datetime.strptime(s, fmt).replace(tzinfo=timezone.utc).timestamp()
+        except ValueError:
+            continue
+    return 0.0
+
+
+def h(n):
+    """Человекочитаемый размер токенов: 1234567 -> 1.2M"""
+    for unit, size in (("B", 1e9), ("M", 1e6), ("K", 1e3)):
+        if n >= size:
+            return f"{n / size:.1f}{unit}"
+    return str(int(n))
+
+
+def money(x):
+    return f"${x:,.2f}"
+
+
+# ---------------------------------------------------------------- сбор данных
+
+class Rec:
+    __slots__ = ("t", "model", "session", "project",
+                 "tin", "tout", "cw", "cr", "cost", "day", "hour")
+
 
 def collect():
-    """Возвращает {model: {in, out, cw, cr}} по всем сессиям, без дублей."""
+    """Проходит все JSONL, дедуплицирует по message.id.
+    Возвращает (records, titles: session->str)."""
     seen = set()
-    tok = defaultdict(lambda: defaultdict(int))
+    records = []
+    titles = {}
     for fp in glob.glob(os.path.join(ROOT, "**", "*.jsonl"), recursive=True):
         try:
-            f = open(fp, errors="replace")
+            fh = open(fp, errors="replace")
         except OSError:
             continue
-        with f:
-            for line in f:
-                if '"usage"' not in line:
+        with fh:
+            for line in fh:
+                if '"usage"' not in line and '"type":"user"' not in line \
+                        and '"type": "user"' not in line:
                     continue
                 try:
                     o = json.loads(line)
                 except ValueError:
                     continue
-                if o.get("type") != "assistant":
+                typ = o.get("type")
+                if typ == "user":
+                    _maybe_title(o, titles)
+                    continue
+                if typ != "assistant":
                     continue
                 m = o.get("message", {})
                 u = m.get("usage")
@@ -52,58 +108,477 @@ def collect():
                 if not u or mid in seen:
                     continue
                 seen.add(mid)
-                t = tok[m.get("model", "unknown")]
-                t["in"] += u.get("input_tokens", 0)
-                t["out"] += u.get("output_tokens", 0)
-                t["cw"] += u.get("cache_creation_input_tokens", 0)
-                t["cr"] += u.get("cache_read_input_tokens", 0)
-    return tok
+                r = Rec()
+                r.model = m.get("model", "unknown")
+                r.session = o.get("sessionId", "?")
+                cwd = o.get("cwd") or ""
+                r.project = os.path.basename(cwd) or "?"
+                r.tin = u.get("input_tokens", 0)
+                r.tout = u.get("output_tokens", 0)
+                r.cw = u.get("cache_creation_input_tokens", 0)
+                r.cr = u.get("cache_read_input_tokens", 0)
+                if r.tin + r.tout + r.cw + r.cr == 0:
+                    continue                       # синтетические/пустые сообщения
+                r.cost = cost_of(r.model, r.tin, r.tout, r.cw, r.cr)
+                r.t = parse_ts(o.get("timestamp"))
+                if r.t:
+                    lt = datetime.fromtimestamp(r.t)
+                    r.day = lt.strftime("%Y-%m-%d")
+                    r.hour = lt.hour
+                else:
+                    r.day, r.hour = "?", -1
+                records.append(r)
+    return records, titles
 
 
-def cost(model, t):
-    pin, pout = PRICE.get(model, (0, 0))
-    ci = pin / 1e6
-    return (t["in"] * ci
-            + t["out"] * pout / 1e6
-            + t["cw"] * ci * CACHE_WRITE
-            + t["cr"] * ci * CACHE_READ)
+def _maybe_title(o, titles):
+    if o.get("isSidechain"):
+        return
+    sid = o.get("sessionId")
+    if not sid or sid in titles:
+        return
+    c = o.get("message", {}).get("content")
+    text = None
+    if isinstance(c, str):
+        text = c
+    elif isinstance(c, list):
+        for b in c:
+            if isinstance(b, dict) and b.get("type") == "text":
+                text = b.get("text")
+                break
+    if not text:
+        return
+    text = " ".join(text.split())
+    if text and not text.startswith("<") and not text.startswith("Caveat"):
+        titles[sid] = text[:80]
 
 
-def h(n):
-    """Человекочитаемый размер: 1234567 -> 1.2M"""
-    for unit, size in (("B", 1e9), ("M", 1e6), ("K", 1e3)):
-        if n >= size:
-            return f"{n / size:.1f}{unit}"
-    return str(n)
+# ---------------------------------------------------------------- агрегация
 
+def tok(a):
+    return a["tin"] + a["tout"] + a["cw"] + a["cr"]
+
+
+def aggregate(records, keyfn):
+    d = {}
+    for r in records:
+        k = keyfn(r)
+        a = d.get(k)
+        if a is None:
+            a = d[k] = {"tin": 0, "tout": 0, "cw": 0, "cr": 0,
+                        "cost": 0.0, "msgs": 0, "mc": defaultdict(int)}
+        a["tin"] += r.tin
+        a["tout"] += r.tout
+        a["cw"] += r.cw
+        a["cr"] += r.cr
+        a["cost"] += r.cost
+        a["msgs"] += 1
+        a["mc"][r.model] += r.tin + r.tout + r.cw + r.cr
+    return d
+
+
+def top_model(a):
+    return max(a["mc"].items(), key=lambda kv: kv[1])[0] if a["mc"] else "?"
+
+
+def overview(records):
+    if not records:
+        return None
+    total_cost = sum(r.cost for r in records)
+    total_tok = sum(r.tin + r.tout + r.cw + r.cr for r in records)
+    tin = sum(r.tin for r in records)
+    tout = sum(r.tout for r in records)
+    cw = sum(r.cw for r in records)
+    cr = sum(r.cr for r in records)
+    days = aggregate(records, lambda r: r.day)
+    days.pop("?", None)
+    busiest = max(days.items(), key=lambda kv: kv[1]["cost"]) if days else ("?", {"cost": 0})
+    hours = aggregate([r for r in records if r.hour >= 0], lambda r: r.hour)
+    peak_h = max(hours.items(), key=lambda kv: kv[1]["cost"]) if hours else (-1, {"cost": 0})
+    models = aggregate(records, lambda r: r.model)
+    top_m = max(models.items(), key=lambda kv: kv[1]["cost"]) if models else ("?", {"cost": 0})
+    dd = sorted(days) if days else []
+    return {
+        "cost": total_cost, "tok": total_tok,
+        "tin": tin, "tout": tout, "cw": cw, "cr": cr,
+        "msgs": len(records),
+        "sessions": len({r.session for r in records}),
+        "ndays": len(days),
+        "first": dd[0] if dd else "?", "last": dd[-1] if dd else "?",
+        "busiest_day": busiest, "peak_hour": peak_h,
+        "top_model": top_m,
+        "avg_day": total_cost / len(days) if days else 0,
+        "cache_share": (cr / total_tok * 100) if total_tok else 0,
+        "days": days,
+    }
+
+
+# ---------------------------------------------------------------- периоды
+
+PERIODS = ["всё", "сегодня", "7 дней", "30 дней"]
+
+
+def cutoff(idx):
+    if idx == 0:
+        return None
+    now = time.time()
+    if idx == 1:
+        t = datetime.now()
+        return datetime(t.year, t.month, t.day).timestamp()
+    if idx == 2:
+        return now - 7 * 86400
+    if idx == 3:
+        return now - 30 * 86400
+    return None
+
+
+def apply_period(records, idx):
+    c = cutoff(idx)
+    if c is None:
+        return records
+    return [r for r in records if r.t >= c]
+
+
+# ---------------------------------------------------------------- графики
+
+FULL = "█"
+EIGHTHS = "▏▎▍▌▋▊▉█"
+SPARK = " ▁▂▃▄▅▆▇█"
+
+
+def bar(frac, width):
+    if width <= 0 or frac <= 0:
+        return ""
+    fb = frac * width
+    n = int(fb)
+    s = FULL * min(n, width)
+    if n < width:
+        rem = fb - n
+        if rem > 0:
+            s += EIGHTHS[min(int(rem * 8), 7)]
+    return s
+
+
+def sparkline(values, width):
+    vals = values[-width:] if len(values) > width else values
+    if not vals:
+        return ""
+    mx = max(vals) or 1
+    return "".join(SPARK[min(int(v / mx * 8), 8)] for v in vals)
+
+
+# ---------------------------------------------------------------- текстовый режим
+
+def print_text(records, titles):
+    ov = overview(records)
+    if not ov:
+        print("нет данных")
+        return
+    print()
+    print(f"  ВСЕГО   {ov['tok']:,} токенов   ≈ {money(ov['cost'])} (по прайсу API)")
+    print(f"          {ov['msgs']:,} сообщений · {ov['sessions']} чатов · "
+          f"{ov['ndays']} дней ({ov['first']} … {ov['last']})")
+    bd, bh = ov["busiest_day"], ov["peak_hour"]
+    print(f"          пик дня: {bd[0]} ({money(bd[1]['cost'])}) · "
+          f"пик часа: {bh[0]:02d}:00 · ${ov['avg_day']:.2f}/день · "
+          f"кэш-чтения {ov['cache_share']:.1f}% токенов")
+
+    def table(title, agg, namefn, sortkey="cost", limit=15, showmodel=False):
+        rows = sorted(agg.items(), key=lambda kv: -kv[1][sortkey])[:limit]
+        if not rows:
+            return
+        mx = max(tok(a) for _, a in rows) or 1
+        print(f"\n  {title}")
+        print("  " + "-" * 72)
+        for k, a in rows:
+            name = namefn(k, a)[:30]
+            b = bar(tok(a) / mx, 14)
+            mdl = f" {top_model(a).replace('claude-', ''):11}" if showmodel else ""
+            print(f"  {name:30}{mdl} {b:14} {h(tok(a)):>7} {money(a['cost']):>11}")
+
+    table("МОДЕЛИ", aggregate(records, lambda r: r.model),
+          lambda k, a: k.replace("claude-", ""))
+    days = aggregate(records, lambda r: r.day)
+    days.pop("?", None)
+    table("ДНИ (топ по $)", days, lambda k, a: k)
+    chats = aggregate(records, lambda r: r.session)
+    table("ЧАТЫ", chats,
+          lambda k, a: titles.get(k, "(" + k[:8] + ")"), showmodel=True)
+    table("ПРОЕКТЫ", aggregate(records, lambda r: r.project), lambda k, a: k)
+    hours = aggregate([r for r in records if r.hour >= 0], lambda r: r.hour)
+    print("\n  ЧАСЫ (по $, локальное время)")
+    print("  " + "-" * 72)
+    mxh = max((a["cost"] for a in hours.values()), default=1) or 1
+    for hh in range(24):
+        a = hours.get(hh)
+        c = a["cost"] if a else 0
+        print(f"  {hh:02d}:00  {bar(c / mxh, 40):40} {money(c):>10}")
+    print()
+
+
+# ---------------------------------------------------------------- TUI (curses)
+
+TABS = ["Обзор", "Модели", "Дни", "Чаты", "Проекты", "Часы"]
+
+
+class App:
+    def __init__(self, records, titles):
+        self.records = records
+        self.titles = titles
+        self.tab = 0
+        self.period = 0
+        self.sortkey = "cost"          # cost | tok
+        self.sel = [0] * len(TABS)
+        self.recompute()
+
+    def recompute(self):
+        self.f = apply_period(self.records, self.period)
+        self.ov = overview(self.f)
+        self.ag_models = aggregate(self.f, lambda r: r.model)
+        days = aggregate(self.f, lambda r: r.day)
+        days.pop("?", None)
+        self.ag_days = days
+        self.ag_chats = aggregate(self.f, lambda r: r.session)
+        self.ag_proj = aggregate(self.f, lambda r: r.project)
+        self.ag_hours = aggregate([r for r in self.f if r.hour >= 0], lambda r: r.hour)
+
+    def sorted_rows(self, agg):
+        if self.sortkey == "tok":
+            return sorted(agg.items(), key=lambda kv: -tok(kv[1]))
+        return sorted(agg.items(), key=lambda kv: -kv[1]["cost"])
+
+    def rows_for(self, tab):
+        if tab == 1:
+            return self.sorted_rows(self.ag_models)
+        if tab == 2:
+            return sorted(self.ag_days.items())          # по дате
+        if tab == 3:
+            return self.sorted_rows(self.ag_chats)
+        if tab == 4:
+            return self.sorted_rows(self.ag_proj)
+        if tab == 5:
+            return [(hh, self.ag_hours.get(hh)) for hh in range(24)]
+        return []
+
+    # ------------------------------------------------------------ цикл
+    def run(self, scr):
+        try:
+            locale.setlocale(locale.LC_ALL, "")
+        except locale.Error:
+            pass
+        curses.curs_set(0)
+        scr.timeout(-1)
+        self._init_colors()
+        while True:
+            self.draw(scr)
+            ch = scr.getch()
+            if not self.handle(ch):
+                break
+
+    def _init_colors(self):
+        self.c = defaultdict(int)
+        if not curses.has_colors():
+            return
+        curses.start_color()
+        try:
+            curses.use_default_colors()
+            bg = -1
+        except curses.error:
+            bg = curses.COLOR_BLACK
+        pairs = {
+            "tab":   (curses.COLOR_BLACK, curses.COLOR_CYAN),
+            "bar":   (curses.COLOR_CYAN, bg),
+            "money": (curses.COLOR_GREEN, bg),
+            "head":  (curses.COLOR_YELLOW, bg),
+            "dim":   (curses.COLOR_BLUE, bg),
+        }
+        i = 1
+        for name, (fg, b) in pairs.items():
+            try:
+                curses.init_pair(i, fg, b)
+                self.c[name] = curses.color_pair(i)
+            except curses.error:
+                self.c[name] = 0
+            i += 1
+
+    def handle(self, ch):
+        if ch in (ord("q"), 27):
+            return False
+        n = len(TABS)
+        if ch in (curses.KEY_RIGHT, ord("l"), ord("]"), ord("\t")):
+            self.tab = (self.tab + 1) % n
+        elif ch in (curses.KEY_LEFT, ord("h"), ord("[")):
+            self.tab = (self.tab - 1) % n
+        elif ord("1") <= ch <= ord("6"):
+            self.tab = ch - ord("1")
+        elif ch in (curses.KEY_DOWN, ord("j")):
+            self.sel[self.tab] += 1
+        elif ch in (curses.KEY_UP, ord("k")):
+            self.sel[self.tab] = max(0, self.sel[self.tab] - 1)
+        elif ch == curses.KEY_NPAGE:
+            self.sel[self.tab] += 10
+        elif ch == curses.KEY_PPAGE:
+            self.sel[self.tab] = max(0, self.sel[self.tab] - 10)
+        elif ch in (curses.KEY_HOME, ord("g")):
+            self.sel[self.tab] = 0
+        elif ch == ord("f"):
+            self.period = (self.period + 1) % len(PERIODS)
+            self.recompute()
+        elif ch == ord("F"):
+            self.period = (self.period - 1) % len(PERIODS)
+            self.recompute()
+        elif ch == ord("s"):
+            self.sortkey = "tok" if self.sortkey == "cost" else "cost"
+        return True
+
+    def add(self, scr, y, x, s, attr=0):
+        maxy, maxx = scr.getmaxyx()
+        if y < 0 or y >= maxy or x < 0 or x >= maxx:
+            return
+        s = s[: maxx - x - 1]
+        try:
+            scr.addstr(y, x, s, attr)
+        except curses.error:
+            pass
+
+    def draw(self, scr):
+        scr.erase()
+        maxy, maxx = scr.getmaxyx()
+        head = self.ov
+        cost = money(head["cost"]) if head else "$0.00"
+        toks = h(head["tok"]) if head else "0"
+        self.add(scr, 0, 1, "ccost", curses.A_BOLD)
+        right = f"{toks} токенов · {cost} · период: {PERIODS[self.period]}"
+        self.add(scr, 0, max(8, maxx - len(right) - 2), right, self.c["dim"])
+        # вкладки
+        x = 1
+        for i, name in enumerate(TABS):
+            label = f" {i+1}·{name} "
+            attr = self.c["tab"] | curses.A_BOLD if i == self.tab else curses.A_DIM
+            self.add(scr, 1, x, label, attr)
+            x += len(label) + 1
+        self.add(scr, 2, 1, "─" * (maxx - 2), self.c["dim"])
+        body_top = 3
+        body_h = maxy - body_top - 1
+        if not head:
+            self.add(scr, body_top + 1, 2,
+                     "нет данных за период «%s»" % PERIODS[self.period])
+        elif self.tab == 0:
+            self.draw_overview(scr, body_top, body_h, maxx)
+        elif self.tab == 5:
+            self.draw_hours(scr, body_top, body_h, maxx)
+        else:
+            self.draw_table(scr, body_top, body_h, maxx)
+        foot = ("←→/1-6 вкладки · ↑↓ скролл · f период · s сорт(%s) · q выход"
+                % self.sortkey)
+        self.add(scr, maxy - 1, 1, foot, self.c["dim"])
+        scr.refresh()
+
+    def draw_overview(self, scr, top, h_, maxx):
+        o = self.ov
+        y = top + 1
+        self.add(scr, y, 2, money(o["cost"]), self.c["money"] | curses.A_BOLD)
+        self.add(scr, y, 16, f"{o['tok']:,} токенов", curses.A_BOLD)
+        y += 2
+        lines = [
+            ("сообщений", f"{o['msgs']:,}"),
+            ("чатов", f"{o['sessions']:,}"),
+            ("активных дней", f"{o['ndays']}  ({o['first']} … {o['last']})"),
+            ("в среднем / день", money(o["avg_day"])),
+            ("пик дня", f"{o['busiest_day'][0]}  ({money(o['busiest_day'][1]['cost'])})"),
+            ("пик часа", f"{o['peak_hour'][0]:02d}:00"),
+            ("топ-модель", o["top_model"][0].replace("claude-", "")),
+            ("кэш-чтения", f"{o['cache_share']:.1f}% всех токенов"),
+        ]
+        for name, val in lines:
+            self.add(scr, y, 2, f"{name:>18} :", self.c["dim"])
+            self.add(scr, y, 23, val)
+            y += 1
+        y += 1
+        self.add(scr, y, 2, "токены:", self.c["head"])
+        self.add(scr, y, 12,
+                 f"input {h(o['tin'])} · cache-wr {h(o['cw'])} · "
+                 f"cache-rd {h(o['cr'])} · output {h(o['tout'])}")
+        y += 2
+        self.add(scr, y, 2, "стоимость по дням:", self.c["head"])
+        y += 1
+        days = sorted(self.ag_days.items())
+        if days:
+            vals = [a["cost"] for _, a in days]
+            spark = sparkline(vals, min(maxx - 6, 80))
+            self.add(scr, y, 2, spark, self.c["bar"])
+            y += 1
+            self.add(scr, y, 2,
+                     f"{days[0][0]}  →  {days[-1][0]}   макс ${max(vals):.2f}/день",
+                     self.c["dim"])
+
+    def draw_table(self, scr, top, h_, maxx):
+        rows = self.rows_for(self.tab)
+        sel = self.sel[self.tab] = min(self.sel[self.tab], max(0, len(rows) - 1))
+        off = window(sel, len(rows), h_ - 1)
+        mx = max((tok(a) for _, a in rows), default=1) or 1
+        title = {1: "модель", 2: "день", 3: "чат", 4: "проект"}[self.tab]
+        self.add(scr, top, 2, title, self.c["head"])
+        self.add(scr, top, maxx - 34, "input cache  out", self.c["head"] | curses.A_DIM)
+        self.add(scr, top, maxx - 12, "$", self.c["head"])
+        namew = max(12, maxx - 52)
+        for i in range(off, min(len(rows), off + h_ - 1)):
+            k, a = rows[i]
+            y = top + 1 + (i - off)
+            rowattr = curses.A_REVERSE if i == sel else 0
+            if self.tab == 1:
+                name = k.replace("claude-", "")
+            elif self.tab == 3:
+                name = self.titles.get(k) or f"({k[:8]})"
+            else:
+                name = k
+            self.add(scr, y, 2, f"{name[:namew]:{namew}}", rowattr)
+            bx = 2 + namew + 1
+            self.add(scr, y, bx, bar(tok(a) / mx, 12), self.c["bar"] | rowattr)
+            self.add(scr, y, maxx - 34,
+                     f"{h(a['tin']):>5}{h(a['cw']):>6}{h(a['tout']):>6}",
+                     (self.c["dim"] if not rowattr else 0) | rowattr)
+            self.add(scr, y, maxx - 13, f"{money(a['cost']):>11}",
+                     (self.c["money"] if not rowattr else 0) | rowattr)
+        if len(rows) > h_ - 1:
+            self.add(scr, top, maxx - 46, f"[{sel + 1}/{len(rows)}]", self.c["dim"])
+
+    def draw_hours(self, scr, top, h_, maxx):
+        self.add(scr, top, 2, "активность по часам (локальное время)", self.c["head"])
+        mxc = max((a["cost"] for a in self.ag_hours.values()), default=1) or 1
+        bw = max(10, maxx - 30)
+        for hh in range(24):
+            y = top + 1 + hh
+            if y >= top + h_:
+                break
+            a = self.ag_hours.get(hh)
+            c = a["cost"] if a else 0
+            msgs = a["msgs"] if a else 0
+            self.add(scr, y, 2, f"{hh:02d}:00", self.c["dim"])
+            self.add(scr, y, 8, bar(c / mxc, bw), self.c["bar"])
+            self.add(scr, y, maxx - 20, f"{msgs:>5} msg {money(c):>9}", self.c["money"])
+
+
+def window(sel, n, h_):
+    if n <= h_:
+        return 0
+    return max(0, min(sel - h_ // 2, n - h_))
+
+
+# ---------------------------------------------------------------- main
 
 def main():
-    tok = collect()
-    rows = []
-    for model, t in tok.items():
-        total = t["in"] + t["out"] + t["cw"] + t["cr"]
-        if total == 0:
-            continue
-        cache = t["cw"] + t["cr"]
-        rows.append((model, total, cost(model, t), model in PRICE,
-                     t["in"], cache, t["out"]))
-    rows.sort(key=lambda r: -r[1])
-
-    total_tok = sum(r[1] for r in rows)
-    total_cost = sum(r[2] for r in rows)
-    sum_in = sum(r[4] for r in rows)
-    sum_cache = sum(r[5] for r in rows)
-    sum_out = sum(r[6] for r in rows)
-
-    print(f"\n  Всего:  {total_tok:,} токенов   ≈ ${total_cost:,.2f} (по прайсу API)\n")
-    print(f"  {'модель':26} {'input':>8} {'cache':>8} {'output':>8} {'$':>11}")
-    print("  " + "-" * 63)
-    for model, total, c, known, tin, cache, tout in rows:
-        mark = "" if known else "  ⚠ нет цены"
-        print(f"  {model:26} {h(tin):>8} {h(cache):>8} {h(tout):>8} {c:>11,.2f}{mark}")
-    print("  " + "-" * 63)
-    print(f"  {'ИТОГО':26} {h(sum_in):>8} {h(sum_cache):>8} {h(sum_out):>8} {total_cost:>11,.2f}")
-    print()
+    arg = sys.argv[1] if len(sys.argv) > 1 else ""
+    records, titles = collect()
+    want_text = arg in ("report", "-r", "--report", "text")
+    if want_text or not sys.stdout.isatty():
+        print_text(records, titles)
+        return
+    try:
+        curses.wrapper(App(records, titles).run)
+    except Exception as e:  # фолбэк на текст при любой проблеме с curses
+        sys.stderr.write(f"TUI недоступен ({e}); текстовый отчёт:\n")
+        print_text(records, titles)
 
 
 if __name__ == "__main__":
