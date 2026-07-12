@@ -1,0 +1,110 @@
+#!/usr/bin/env python3
+"""ccost — сколько токенов и денег (по прайсу API) потрачено во всех сессиях Claude Code.
+
+Читает локальные JSONL из ~/.claude/projects/, дедуплицирует вызовы по message.id
+и считает стоимость по стандартному прайсу API. Выводит итог и топ моделей по токенам.
+"""
+import glob
+import json
+import os
+from collections import defaultdict
+
+# $ за 1M токенов (input, output) — стандартный прайс API
+PRICE = {
+    "claude-fable-5":            (10, 50),
+    "claude-opus-4-8":           (5, 25),
+    "claude-opus-4-7":           (5, 25),
+    "claude-opus-4-6":           (5, 25),
+    "claude-opus-4-5":           (5, 25),
+    "claude-sonnet-5":           (3, 15),
+    "claude-sonnet-4-6":         (3, 15),
+    "claude-haiku-4-5":          (1, 5),
+    "claude-haiku-4-5-20251001": (1, 5),
+}
+CACHE_WRITE = 1.25   # запись в кэш (5-мин ephemeral) = 1.25× input
+CACHE_READ = 0.10    # чтение из кэша = 0.1× input
+
+ROOT = os.path.expanduser("~/.claude/projects")
+
+
+def collect():
+    """Возвращает {model: {in, out, cw, cr}} по всем сессиям, без дублей."""
+    seen = set()
+    tok = defaultdict(lambda: defaultdict(int))
+    for fp in glob.glob(os.path.join(ROOT, "**", "*.jsonl"), recursive=True):
+        try:
+            f = open(fp, errors="replace")
+        except OSError:
+            continue
+        with f:
+            for line in f:
+                if '"usage"' not in line:
+                    continue
+                try:
+                    o = json.loads(line)
+                except ValueError:
+                    continue
+                if o.get("type") != "assistant":
+                    continue
+                m = o.get("message", {})
+                u = m.get("usage")
+                mid = m.get("id")
+                if not u or mid in seen:
+                    continue
+                seen.add(mid)
+                t = tok[m.get("model", "unknown")]
+                t["in"] += u.get("input_tokens", 0)
+                t["out"] += u.get("output_tokens", 0)
+                t["cw"] += u.get("cache_creation_input_tokens", 0)
+                t["cr"] += u.get("cache_read_input_tokens", 0)
+    return tok
+
+
+def cost(model, t):
+    pin, pout = PRICE.get(model, (0, 0))
+    ci = pin / 1e6
+    return (t["in"] * ci
+            + t["out"] * pout / 1e6
+            + t["cw"] * ci * CACHE_WRITE
+            + t["cr"] * ci * CACHE_READ)
+
+
+def h(n):
+    """Человекочитаемый размер: 1234567 -> 1.2M"""
+    for unit, size in (("B", 1e9), ("M", 1e6), ("K", 1e3)):
+        if n >= size:
+            return f"{n / size:.1f}{unit}"
+    return str(n)
+
+
+def main():
+    tok = collect()
+    rows = []
+    for model, t in tok.items():
+        total = t["in"] + t["out"] + t["cw"] + t["cr"]
+        if total == 0:
+            continue
+        cache = t["cw"] + t["cr"]
+        rows.append((model, total, cost(model, t), model in PRICE,
+                     t["in"], cache, t["out"]))
+    rows.sort(key=lambda r: -r[1])
+
+    total_tok = sum(r[1] for r in rows)
+    total_cost = sum(r[2] for r in rows)
+    sum_in = sum(r[4] for r in rows)
+    sum_cache = sum(r[5] for r in rows)
+    sum_out = sum(r[6] for r in rows)
+
+    print(f"\n  Всего:  {total_tok:,} токенов   ≈ ${total_cost:,.2f} (по прайсу API)\n")
+    print(f"  {'модель':26} {'input':>8} {'cache':>8} {'output':>8} {'$':>11}")
+    print("  " + "-" * 63)
+    for model, total, c, known, tin, cache, tout in rows:
+        mark = "" if known else "  ⚠ нет цены"
+        print(f"  {model:26} {h(tin):>8} {h(cache):>8} {h(tout):>8} {c:>11,.2f}{mark}")
+    print("  " + "-" * 63)
+    print(f"  {'ИТОГО':26} {h(sum_in):>8} {h(sum_cache):>8} {h(sum_out):>8} {total_cost:>11,.2f}")
+    print()
+
+
+if __name__ == "__main__":
+    main()
