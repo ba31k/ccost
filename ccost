@@ -376,30 +376,53 @@ class App:
                 break
 
     def _init_colors(self):
+        # Роли: dim (второстепенный текст), head (заголовки), money ($),
+        # bar (графики), tab (активная вкладка). Значение каждой роли — готовый
+        # curses-атрибут, который можно | с A_REVERSE и т.п.
         self.c = defaultdict(int)
-        if not curses.has_colors():
+        no_color = os.environ.get("NO_COLOR") is not None
+        if no_color or not curses.has_colors():
+            # без цвета — держим структуру на атрибутах
+            self.c["dim"] = curses.A_DIM
+            self.c["head"] = curses.A_BOLD
+            self.c["money"] = curses.A_BOLD
+            self.c["bar"] = 0
+            self.c["tab"] = curses.A_REVERSE | curses.A_BOLD
             return
         curses.start_color()
         try:
-            curses.use_default_colors()
+            curses.use_default_colors()   # фон = родной фон терминала
             bg = -1
         except curses.error:
             bg = curses.COLOR_BLACK
-        pairs = {
-            "tab":   (curses.COLOR_BLACK, curses.COLOR_CYAN),
-            "bar":   (curses.COLOR_CYAN, bg),
-            "money": (curses.COLOR_GREEN, bg),
-            "head":  (curses.COLOR_YELLOW, bg),
-            "dim":   (curses.COLOR_BLUE, bg),
-        }
-        i = 1
-        for name, (fg, b) in pairs.items():
+        ncolors = getattr(curses, "COLORS", 8)
+        if ncolors >= 256:
+            # аккуратные оттенки, читаемые и на тёмном, и на светлом фоне
+            specs = [
+                ("dim",   245, bg, 0),                 # серый, а не синий
+                ("head",  179, bg, curses.A_BOLD),     # тёпло-жёлтый
+                ("money", 71,  bg, 0),                 # зелёный
+                ("bar",   37,  bg, 0),                 # бирюзовый
+                ("tab",   16,  37, curses.A_BOLD),     # тёмный на бирюзе
+            ]
+        else:
+            # 8/16 цветов: серого нет — берём белый + A_DIM
+            specs = [
+                ("dim",   curses.COLOR_WHITE,  bg, curses.A_DIM),
+                ("head",  curses.COLOR_YELLOW, bg, curses.A_BOLD),
+                ("money", curses.COLOR_GREEN,  bg, 0),
+                ("bar",   curses.COLOR_CYAN,   bg, 0),
+                ("tab",   curses.COLOR_BLACK,  curses.COLOR_CYAN, curses.A_BOLD),
+            ]
+        for i, (name, fg, b, extra) in enumerate(specs, start=1):
             try:
                 curses.init_pair(i, fg, b)
-                self.c[name] = curses.color_pair(i)
+                self.c[name] = curses.color_pair(i) | extra
             except curses.error:
-                self.c[name] = 0
-            i += 1
+                self.c[name] = extra
+        # если активная вкладка осталась без цвета — пусть будет инверсия
+        if not self.c["tab"]:
+            self.c["tab"] = curses.A_REVERSE | curses.A_BOLD
 
     def handle(self, ch):
         if ch in (ord("q"), 27):
