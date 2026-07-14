@@ -2,11 +2,14 @@
 """ccost — статистика токенов и стоимости (по прайсу API) всех сессий Claude Code.
 
 Читает локальные JSONL из ~/.claude/projects/, дедуплицирует вызовы по message.id
-(иначе resume/fork сессий удваивают цифры) и считает стоимость по прайсу API.
+(стриминг пишет несколько строк на сообщение с растущим usage — берём максимум,
+иначе resume/fork удваивают цифры, а первая строка занижает output) и считает
+стоимость по прайсу API, включая 1-часовой кэш (×2 против ×1.25 у 5-минутного).
 
   ccost           — интерактивный TUI (вкладки, периоды, сортировка, графики)
   ccost report    — полный текстовый отчёт (он же фолбэк для пайпа/не-tty)
   ccost -r        — то же, что report
+  ccost json      — агрегаты в JSON (для скриптов)
 """
 import curses
 import glob
@@ -14,9 +17,10 @@ import json
 import locale
 import os
 import sys
+import textwrap
 import time
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, date, timedelta, timezone
 
 # ---------------------------------------------------------------- прайс / цены
 
@@ -30,9 +34,9 @@ PRICE = {
     "claude-sonnet-5":           (3, 15),
     "claude-sonnet-4-6":         (3, 15),
     "claude-haiku-4-5":          (1, 5),
-    "claude-haiku-4-5-20251001": (1, 5),
 }
-CACHE_WRITE = 1.25   # запись в кэш (5-мин ephemeral) = 1.25× input
+CACHE_W_5M = 1.25    # запись в 5-мин ephemeral-кэш = 1.25× input
+CACHE_W_1H = 2.0     # запись в 1-час ephemeral-кэш = 2× input
 CACHE_READ = 0.10    # чтение из кэша = 0.1× input
 
 ROOT = os.path.expanduser("~/.claude/projects")
@@ -40,10 +44,28 @@ ROOT = os.path.expanduser("~/.claude/projects")
 TS_FORMATS = ("%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ")
 
 
-def cost_of(model, tin, tout, cw, cr):
-    pin, pout = PRICE.get(model, (0, 0))
+def price_for(model):
+    """Цена модели; датированные id (…-20251001) матчатся по префиксу."""
+    p = PRICE.get(model)
+    if p:
+        return p
+    for k, v in PRICE.items():
+        if model.startswith(k):
+            return v
+    return None
+
+
+def cost_of(model, tin, tout, cw, cr, cw1h):
+    """None — модели нет в прайсе (стоимость неизвестна)."""
+    p = price_for(model)
+    if p is None:
+        return None
+    pin, pout = p
     ci = pin / 1e6
-    return tin * ci + tout * pout / 1e6 + cw * ci * CACHE_WRITE + cr * ci * CACHE_READ
+    cw5 = max(cw - cw1h, 0)
+    return (tin * ci + tout * pout / 1e6
+            + cw5 * ci * CACHE_W_5M + cw1h * ci * CACHE_W_1H
+            + cr * ci * CACHE_READ)
 
 
 def parse_ts(s):
@@ -58,9 +80,9 @@ def parse_ts(s):
 
 
 def h(n):
-    """Человекочитаемый размер токенов: 1234567 -> 1.2M"""
+    """Человекочитаемый размер токенов: 1234567 -> 1.2M (без «1000.0K»)."""
     for unit, size in (("B", 1e9), ("M", 1e6), ("K", 1e3)):
-        if n >= size:
+        if n >= size * 0.9995:               # 999950 -> 1.0M, а не 1000.0K
             return f"{n / size:.1f}{unit}"
     return str(int(n))
 
@@ -69,22 +91,28 @@ def money(x):
     return f"${x:,.2f}"
 
 
+def fmt_dt(t):
+    return datetime.fromtimestamp(t).strftime("%Y-%m-%d %H:%M")
+
+
 # ---------------------------------------------------------------- сбор данных
 
 class Rec:
     __slots__ = ("t", "model", "session", "project",
-                 "tin", "tout", "cw", "cr", "cost", "day", "hour")
+                 "tin", "tout", "cw", "cr", "cw1h",
+                 "cost", "day", "hour", "wd")
 
 
 def collect():
-    """Проходит все JSONL, дедуплицирует по message.id.
-    Возвращает (records, titles: session->str)."""
-    seen = set()
+    """Проходит все JSONL, дедуплицирует по message.id (пофилдовый максимум).
+    Возвращает (records, titles: session->str, unknown: set[model])."""
+    by_mid = {}
     records = []
     titles = {}
+    unknown = set()
     for fp in glob.glob(os.path.join(ROOT, "**", "*.jsonl"), recursive=True):
         try:
-            fh = open(fp, errors="replace")
+            fh = open(fp, encoding="utf-8", errors="replace")
         except OSError:
             continue
         with fh:
@@ -104,31 +132,51 @@ def collect():
                     continue
                 m = o.get("message", {})
                 u = m.get("usage")
-                mid = m.get("id")
-                if not u or mid in seen:
+                if not u:
                     continue
-                seen.add(mid)
-                r = Rec()
-                r.model = m.get("model", "unknown")
-                r.session = o.get("sessionId", "?")
-                cwd = o.get("cwd") or ""
-                r.project = os.path.basename(cwd) or "?"
-                r.tin = u.get("input_tokens", 0)
-                r.tout = u.get("output_tokens", 0)
-                r.cw = u.get("cache_creation_input_tokens", 0)
-                r.cr = u.get("cache_read_input_tokens", 0)
-                if r.tin + r.tout + r.cw + r.cr == 0:
-                    continue                       # синтетические/пустые сообщения
-                r.cost = cost_of(r.model, r.tin, r.tout, r.cw, r.cr)
-                r.t = parse_ts(o.get("timestamp"))
-                if r.t:
-                    lt = datetime.fromtimestamp(r.t)
-                    r.day = lt.strftime("%Y-%m-%d")
-                    r.hour = lt.hour
+                tin = u.get("input_tokens", 0)
+                tout = u.get("output_tokens", 0)
+                cw = u.get("cache_creation_input_tokens", 0)
+                cr = u.get("cache_read_input_tokens", 0)
+                if tin + tout + cw + cr == 0:
+                    continue                   # синтетические/пустые сообщения
+                cc = u.get("cache_creation") or {}
+                cw1h = cc.get("ephemeral_1h_input_tokens", 0)
+                mid = m.get("id") or object()  # нет id — не дедуплицируем
+                r = by_mid.get(mid)
+                if r is None:
+                    r = Rec()
+                    r.model = m.get("model", "unknown")
+                    r.session = o.get("sessionId", "?")
+                    cwd = o.get("cwd") or ""
+                    r.project = os.path.basename(cwd) or "?"
+                    r.tin, r.tout, r.cw, r.cr, r.cw1h = tin, tout, cw, cr, cw1h
+                    r.t = 0.0
+                    r.day, r.hour, r.wd = "?", -1, -1
+                    by_mid[mid] = r
+                    records.append(r)
                 else:
-                    r.day, r.hour = "?", -1
-                records.append(r)
-    return records, titles
+                    # стриминг: строки одного сообщения с растущим usage
+                    r.tin = max(r.tin, tin)
+                    r.tout = max(r.tout, tout)
+                    r.cw = max(r.cw, cw)
+                    r.cr = max(r.cr, cr)
+                    r.cw1h = max(r.cw1h, cw1h)
+                if not r.t:
+                    t = parse_ts(o.get("timestamp"))
+                    if t:
+                        r.t = t
+                        lt = datetime.fromtimestamp(t)
+                        r.day = lt.strftime("%Y-%m-%d")
+                        r.hour = lt.hour
+                        r.wd = lt.weekday()
+    for r in records:
+        c = cost_of(r.model, r.tin, r.tout, r.cw, r.cr, r.cw1h)
+        if c is None:
+            unknown.add(r.model)
+            c = 0.0
+        r.cost = c
+    return records, titles, unknown
 
 
 def _maybe_title(o, titles):
@@ -198,6 +246,7 @@ def overview(records):
     models = aggregate(records, lambda r: r.model)
     top_m = max(models.items(), key=lambda kv: kv[1]["cost"]) if models else ("?", {"cost": 0})
     dd = sorted(days) if days else []
+    today = datetime.now().strftime("%Y-%m-%d")
     return {
         "cost": total_cost, "tok": total_tok,
         "tin": tin, "tout": tout, "cw": cw, "cr": cr,
@@ -208,27 +257,52 @@ def overview(records):
         "busiest_day": busiest, "peak_hour": peak_h,
         "top_model": top_m,
         "avg_day": total_cost / len(days) if days else 0,
+        "today": days[today]["cost"] if today in days else 0.0,
         "cache_share": (cr / total_tok * 100) if total_tok else 0,
         "days": days,
     }
 
 
+def fill_days(days):
+    """Непрерывный ряд (день, $) от первого до последнего дня — с нулями
+    в дни без активности, чтобы ось времени спарклайна не врала."""
+    if not days:
+        return []
+    ds = sorted(days)
+    try:
+        d0, d1 = date.fromisoformat(ds[0]), date.fromisoformat(ds[-1])
+    except ValueError:
+        return [(k, days[k]["cost"]) for k in ds]
+    if (d1 - d0).days > 730:                  # защита от мусорных таймстампов
+        return [(k, days[k]["cost"]) for k in ds]
+    out = []
+    d = d0
+    while d <= d1:
+        k = d.isoformat()
+        a = days.get(k)
+        out.append((k, a["cost"] if a else 0.0))
+        d += timedelta(days=1)
+    return out
+
+
 # ---------------------------------------------------------------- периоды
 
-PERIODS = ["всё", "сегодня", "7 дней", "30 дней"]
+PERIODS = ["всё", "сегодня", "7 дней", "30 дней", "месяц"]
 
 
 def cutoff(idx):
     if idx == 0:
         return None
     now = time.time()
+    t = datetime.now()
     if idx == 1:
-        t = datetime.now()
         return datetime(t.year, t.month, t.day).timestamp()
     if idx == 2:
         return now - 7 * 86400
     if idx == 3:
         return now - 30 * 86400
+    if idx == 4:
+        return datetime(t.year, t.month, 1).timestamp()
     return None
 
 
@@ -245,15 +319,17 @@ FULL = "█"
 EIGHTHS = "▏▎▍▌▋▊▉█"
 SPARK = " ▁▂▃▄▅▆▇█"
 SEP = "─"
+BOX = "┌┐└┘─│"
 
 
 def set_ascii_glyphs():
     """Фолбэк, когда UTF-8 недоступен: рисуем графику на ASCII, а не на ?."""
-    global FULL, EIGHTHS, SPARK, SEP
+    global FULL, EIGHTHS, SPARK, SEP, BOX
     FULL = "#"
     EIGHTHS = " .:-=+*#"
     SPARK = " .:-=+*#@"
     SEP = "-"
+    BOX = "++++-|"
 
 
 def bar(frac, width):
@@ -277,9 +353,15 @@ def sparkline(values, width):
     return "".join(SPARK[min(int(v / mx * 8), 8)] for v in vals)
 
 
+def spark_level(v, mx):
+    if v <= 0:
+        return 0
+    return max(1, min(int(v / mx * 8), 8))
+
+
 # ---------------------------------------------------------------- текстовый режим
 
-def print_text(records, titles):
+def print_text(records, titles, unknown):
     ov = overview(records)
     if not ov:
         print("нет данных")
@@ -289,9 +371,12 @@ def print_text(records, titles):
     print(f"          {ov['msgs']:,} сообщений · {ov['sessions']} чатов · "
           f"{ov['ndays']} дней ({ov['first']} … {ov['last']})")
     bd, bh = ov["busiest_day"], ov["peak_hour"]
+    peak = f"{bh[0]:02d}:00" if bh[0] >= 0 else "—"
     print(f"          пик дня: {bd[0]} ({money(bd[1]['cost'])}) · "
-          f"пик часа: {bh[0]:02d}:00 · ${ov['avg_day']:.2f}/день · "
-          f"кэш-чтения {ov['cache_share']:.1f}% токенов")
+          f"пик часа: {peak} · ${ov['avg_day']:.2f}/день · "
+          f"сегодня {money(ov['today'])} · кэш-чтения {ov['cache_share']:.1f}% токенов")
+    if unknown:
+        print(f"          нет прайса (стоимость = $0): {', '.join(sorted(unknown))}")
 
     def table(title, agg, namefn, sortkey="cost", limit=15, showmodel=False):
         rows = sorted(agg.items(), key=lambda kv: -kv[1][sortkey])[:limit]
@@ -326,19 +411,66 @@ def print_text(records, titles):
     print()
 
 
+def print_json(records, titles, unknown):
+    ov = overview(records)
+
+    def pack(agg, namefn=None, sort=True):
+        items = agg.items()
+        if sort:
+            items = sorted(items, key=lambda kv: -kv[1]["cost"])
+        out = []
+        for k, a in items:
+            d = {"key": str(k), "cost": round(a["cost"], 4), "tokens": tok(a),
+                 "input": a["tin"], "output": a["tout"],
+                 "cache_write": a["cw"], "cache_read": a["cr"], "msgs": a["msgs"]}
+            if namefn:
+                d["title"] = namefn(k)
+            out.append(d)
+        return out
+
+    if not ov:
+        json.dump({"total": None}, sys.stdout)
+        print()
+        return
+    days = aggregate(records, lambda r: r.day)
+    days.pop("?", None)
+    data = {
+        "total": {
+            "cost": round(ov["cost"], 4), "tokens": ov["tok"],
+            "input": ov["tin"], "output": ov["tout"],
+            "cache_write": ov["cw"], "cache_read": ov["cr"],
+            "msgs": ov["msgs"], "sessions": ov["sessions"],
+            "days": ov["ndays"], "first": ov["first"], "last": ov["last"],
+        },
+        "unknown_models": sorted(unknown),
+        "models": pack(aggregate(records, lambda r: r.model)),
+        "days": pack(days, sort=False),
+        "chats": pack(aggregate(records, lambda r: r.session),
+                      namefn=lambda k: titles.get(k, "")),
+        "projects": pack(aggregate(records, lambda r: r.project)),
+        "hours": pack(aggregate([r for r in records if r.hour >= 0],
+                                lambda r: r.hour), sort=False),
+    }
+    json.dump(data, sys.stdout, ensure_ascii=False, indent=2)
+    print()
+
+
 # ---------------------------------------------------------------- TUI (curses)
 
-TABS = ["Обзор", "Модели", "Дни", "Чаты", "Проекты", "Часы"]
+TABS = ["Обзор", "Модели", "Дни", "Чаты", "Проекты", "Часы", "Неделя"]
+WDAYS = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"]
 
 
 class App:
-    def __init__(self, records, titles):
+    def __init__(self, records, titles, unknown):
         self.records = records
         self.titles = titles
+        self.unknown = unknown
         self.tab = 0
         self.period = 0
         self.sortkey = "cost"          # cost | tok
         self.sel = [0] * len(TABS)
+        self.detail = None             # (tab, key) — открытая карточка
         self.recompute()
 
     def recompute(self):
@@ -351,6 +483,11 @@ class App:
         self.ag_chats = aggregate(self.f, lambda r: r.session)
         self.ag_proj = aggregate(self.f, lambda r: r.project)
         self.ag_hours = aggregate([r for r in self.f if r.hour >= 0], lambda r: r.hour)
+        heat = defaultdict(float)
+        for r in self.f:
+            if r.hour >= 0 and r.wd >= 0:
+                heat[(r.wd, r.hour)] += r.cost
+        self.ag_heat = dict(heat)
 
     def sorted_rows(self, agg):
         if self.sortkey == "tok":
@@ -378,8 +515,18 @@ class App:
         while True:
             self.draw(scr)
             ch = scr.getch()
+            if ch == ord("r"):
+                self.reload(scr)
+                continue
             if not self.handle(ch):
                 break
+
+    def reload(self, scr):
+        maxy, maxx = scr.getmaxyx()
+        self.add(scr, maxy - 1, 1, "обновление данных…".ljust(maxx - 2), self.c["head"])
+        scr.refresh()
+        self.records, self.titles, self.unknown = collect()
+        self.recompute()
 
     def _init_colors(self):
         # Роли: dim (второстепенный текст), head (заголовки), money ($),
@@ -436,6 +583,10 @@ class App:
             self.c["sel"] = curses.A_REVERSE | curses.A_BOLD
 
     def handle(self, ch):
+        if self.detail is not None:
+            if ch in (27, ord("q"), curses.KEY_ENTER, 10, 13):
+                self.detail = None
+            return True
         if ch in (ord("q"), 27):
             return False
         n = len(TABS)
@@ -443,7 +594,7 @@ class App:
             self.tab = (self.tab + 1) % n
         elif ch in (curses.KEY_LEFT, ord("h"), ord("[")):
             self.tab = (self.tab - 1) % n
-        elif ord("1") <= ch <= ord("6"):
+        elif ord("1") <= ch < ord("1") + n:
             self.tab = ch - ord("1")
         elif ch in (curses.KEY_DOWN, ord("j")):
             self.sel[self.tab] += 1
@@ -455,6 +606,13 @@ class App:
             self.sel[self.tab] = max(0, self.sel[self.tab] - 10)
         elif ch in (curses.KEY_HOME, ord("g")):
             self.sel[self.tab] = 0
+        elif ch in (curses.KEY_END, ord("G")):
+            self.sel[self.tab] = 10 ** 9      # прижмётся в draw_table
+        elif ch in (curses.KEY_ENTER, 10, 13) and self.tab in (1, 2, 3, 4):
+            rows = self.rows_for(self.tab)
+            if rows:
+                sel = min(self.sel[self.tab], len(rows) - 1)
+                self.detail = (self.tab, rows[sel][0])
         elif ch == ord("f"):
             self.period = (self.period + 1) % len(PERIODS)
             self.recompute()
@@ -501,10 +659,16 @@ class App:
             self.draw_overview(scr, body_top, body_h, maxx)
         elif self.tab == 5:
             self.draw_hours(scr, body_top, body_h, maxx)
+        elif self.tab == 6:
+            self.draw_heat(scr, body_top, body_h, maxx)
         else:
             self.draw_table(scr, body_top, body_h, maxx)
-        foot = ("←→/1-6 вкладки · ↑↓ скролл · f период · s сорт(%s) · q выход"
-                % self.sortkey)
+        if self.detail is not None:
+            self.draw_detail(scr, maxy, maxx)
+            foot = "Esc/Enter — закрыть карточку"
+        else:
+            foot = ("←→/1-7 вкладки · ↑↓ скролл · Enter детали · f период · "
+                    "s сорт(%s) · r обновить · q выход" % self.sortkey)
         self.add(scr, maxy - 1, 1, foot, self.c["dim"])
         scr.refresh()
 
@@ -514,13 +678,15 @@ class App:
         self.add(scr, y, 2, money(o["cost"]), self.c["money"] | curses.A_BOLD)
         self.add(scr, y, 16, f"{o['tok']:,} токенов", curses.A_BOLD)
         y += 2
+        peak = f"{o['peak_hour'][0]:02d}:00" if o["peak_hour"][0] >= 0 else "—"
         lines = [
             ("сообщений", f"{o['msgs']:,}"),
             ("чатов", f"{o['sessions']:,}"),
             ("активных дней", f"{o['ndays']}  ({o['first']} … {o['last']})"),
             ("в среднем / день", money(o["avg_day"])),
+            ("сегодня", money(o["today"])),
             ("пик дня", f"{o['busiest_day'][0]}  ({money(o['busiest_day'][1]['cost'])})"),
-            ("пик часа", f"{o['peak_hour'][0]:02d}:00"),
+            ("пик часа", peak),
             ("топ-модель", o["top_model"][0].replace("claude-", "")),
             ("кэш-чтения", f"{o['cache_share']:.1f}% всех токенов"),
         ]
@@ -533,17 +699,24 @@ class App:
         self.add(scr, y, 12,
                  f"input {h(o['tin'])} · cache-wr {h(o['cw'])} · "
                  f"cache-rd {h(o['cr'])} · output {h(o['tout'])}")
-        y += 2
+        y += 1
+        if self.unknown:
+            self.add(scr, y, 2,
+                     "нет прайса (стоимость = $0): " + ", ".join(sorted(self.unknown)),
+                     self.c["head"])
+            y += 1
+        y += 1
         self.add(scr, y, 2, "стоимость по дням:", self.c["head"])
         y += 1
-        days = sorted(self.ag_days.items())
-        if days:
-            vals = [a["cost"] for _, a in days]
-            spark = sparkline(vals, min(maxx - 6, 80))
-            self.add(scr, y, 2, spark, self.c["bar"])
+        seq = fill_days(self.ag_days)
+        if seq:
+            width = min(maxx - 6, 80)
+            shown = seq[-width:]
+            vals = [c for _, c in shown]
+            self.add(scr, y, 2, sparkline(vals, width), self.c["bar"])
             y += 1
             self.add(scr, y, 2,
-                     f"{days[0][0]}  →  {days[-1][0]}   макс ${max(vals):.2f}/день",
+                     f"{shown[0][0]}  →  {shown[-1][0]}   макс ${max(vals):.2f}/день",
                      self.c["dim"])
 
     def draw_table(self, scr, top, h_, maxx):
@@ -553,9 +726,12 @@ class App:
         mx = max((tok(a) for _, a in rows), default=1) or 1
         title = {1: "модель", 2: "день", 3: "чат", 4: "проект"}[self.tab]
         self.add(scr, top, 2, title, self.c["head"])
-        self.add(scr, top, maxx - 34, "input cache  out", self.c["head"] | curses.A_DIM)
+        self.add(scr, top, maxx - 37, f"{'input':>6}{'cache':>7}{'out':>7}",
+                 self.c["head"] | curses.A_DIM)
         self.add(scr, top, maxx - 12, "$", self.c["head"])
-        namew = max(12, maxx - 52)
+        namew = max(12, maxx - 55)
+        bx = 2 + namew + 1
+        bw = max(0, min(12, maxx - 38 - bx))   # не наезжать на числа в узком окне
         for i in range(off, min(len(rows), off + h_ - 1)):
             k, a = rows[i]
             y = top + 1 + (i - off)
@@ -574,10 +750,9 @@ class App:
                 name = k
             mark = "> " if selected else "  "
             self.add(scr, y, 1, f"{mark}{name}"[:namew + 1].ljust(namew + 1), a_txt)
-            bx = 2 + namew + 1
-            self.add(scr, y, bx, bar(tok(a) / mx, 12), a_bar)
-            self.add(scr, y, maxx - 34,
-                     f"{h(a['tin']):>5}{h(a['cw']):>6}{h(a['tout']):>6}", a_dim)
+            self.add(scr, y, bx, bar(tok(a) / mx, bw), a_bar)
+            self.add(scr, y, maxx - 37,
+                     f"{h(a['tin']):>6}{h(a['cw'] + a['cr']):>7}{h(a['tout']):>7}", a_dim)
             self.add(scr, y, maxx - 13, f"{money(a['cost']):>11}", a_mon)
         if len(rows) > h_ - 1:
             self.add(scr, top, maxx - 46, f"[{sel + 1}/{len(rows)}]", self.c["dim"])
@@ -596,6 +771,117 @@ class App:
             self.add(scr, y, 2, f"{hh:02d}:00", self.c["dim"])
             self.add(scr, y, 8, bar(c / mxc, bw), self.c["bar"])
             self.add(scr, y, maxx - 20, f"{msgs:>5} msg {money(c):>9}", self.c["money"])
+
+    def draw_heat(self, scr, top, h_, maxx):
+        self.add(scr, top, 2, "стоимость по дням недели и часам (локальное время)",
+                 self.c["head"])
+        heat = self.ag_heat
+        mx = max(heat.values(), default=0) or 1
+        x0 = 6
+        ruler = "".join(f"{hh:02d}" + " " * 6 for hh in (0, 4, 8, 12, 16, 20))
+        self.add(scr, top + 2, x0, ruler[:48], self.c["dim"])
+        for wd in range(7):
+            y = top + 3 + wd
+            if y >= top + h_:
+                return
+            row_cost = 0.0
+            cells = []
+            for hh in range(24):
+                v = heat.get((wd, hh), 0.0)
+                row_cost += v
+                cells.append(SPARK[spark_level(v, mx)] * 2)
+            self.add(scr, y, 2, WDAYS[wd], self.c["dim"])
+            self.add(scr, y, x0, "".join(cells), self.c["bar"])
+            if row_cost:
+                self.add(scr, y, x0 + 50, f"{money(row_cost):>10}", self.c["money"])
+        y = top + 11
+        if y < top + h_:
+            self.add(scr, y, 2,
+                     f"ячейка = час недели · {FULL} = {money(mx)} (макс за час)",
+                     self.c["dim"])
+
+    # ------------------------------------------------------------ карточка
+    def _detail_records(self, tab, key):
+        fld = {1: "model", 2: "day", 3: "session", 4: "project"}[tab]
+        return [r for r in self.f if getattr(r, fld) == key]
+
+    def draw_detail(self, scr, maxy, maxx):
+        tab, key = self.detail
+        sub = self._detail_records(tab, key)
+        if not sub:
+            self.detail = None
+            return
+        kind = {1: "модель", 2: "день", 3: "чат", 4: "проект"}[tab]
+        if tab == 1:
+            name = key.replace("claude-", "")
+        elif tab == 3:
+            name = self.titles.get(key) or "(без названия)"
+        else:
+            name = key
+        total = sum(r.cost for r in sub)
+        tin = sum(r.tin for r in sub)
+        tout = sum(r.tout for r in sub)
+        cw = sum(r.cw for r in sub)
+        cr = sum(r.cr for r in sub)
+        ts = [r.t for r in sub if r.t]
+        days = {r.day for r in sub if r.day != "?"}
+
+        w = min(maxx - 4, 74)
+        inner = w - 4
+        lines = []                      # (текст, роль)
+        for part in textwrap.wrap(name, inner)[:2] or [name[:inner]]:
+            lines.append((part, "head"))
+        if tab == 3:
+            lines.append((f"id {str(key)[:8]} · проект {sub[0].project}", "dim"))
+        else:
+            ns = len({r.session for r in sub})
+            lines.append((f"чатов: {ns}", "dim"))
+        lines.append(("", ""))
+        lines.append((f"{money(total)} · {len(sub):,} сообщений · "
+                      f"{money(total / len(sub))}/сообщение", "money"))
+        if ts:
+            t0, t1 = min(ts), max(ts)
+            if tab == 3:
+                dur = t1 - t0
+                dtxt = f"{dur / 3600:.1f} ч" if dur >= 3600 else f"{dur / 60:.0f} мин"
+                lines.append((f"{fmt_dt(t0)} … {fmt_dt(t1)}  ({dtxt})", ""))
+            elif days:
+                lines.append((f"активность: {min(days)} … {max(days)} "
+                              f"({len(days)} дн.)", ""))
+        lines.append((f"токены: input {h(tin)} · cache-wr {h(cw)} · "
+                      f"cache-rd {h(cr)} · output {h(tout)}", "dim"))
+        lines.append(("", ""))
+        if tab == 3:
+            agg = aggregate(sub, lambda r: r.model)
+            lines.append(("модели:", "head"))
+            namef = lambda k: k.replace("claude-", "")
+        else:
+            agg = aggregate(sub, lambda r: r.session)
+            lines.append(("топ-чаты:", "head"))
+            namef = lambda k: self.titles.get(k) or "(" + str(k)[:8] + ")"
+        rows = sorted(agg.items(), key=lambda kv: -kv[1]["cost"])[:5]
+        mxc = rows[0][1]["cost"] or 1 if rows else 1
+        nw = inner - 25
+        for k, a in rows:
+            nm = namef(k)[:nw]
+            lines.append((f" {nm:<{nw}} {bar(a['cost'] / mxc, 10):<10} "
+                          f"{money(a['cost']):>11}", ""))
+
+        hgt = len(lines) + 2
+        if hgt > maxy - 2:
+            lines = lines[: maxy - 4]
+            hgt = len(lines) + 2
+        y0 = max(1, (maxy - hgt) // 2)
+        x0 = max(0, (maxx - w) // 2)
+        tl, tr, bl, br, hz, vt = BOX
+        title = f" {kind} "
+        top_line = tl + hz * 2 + title + hz * max(0, w - 4 - len(title)) + tr
+        self.add(scr, y0, x0, top_line[:w], self.c["head"])
+        for i, (text, role) in enumerate(lines):
+            y = y0 + 1 + i
+            self.add(scr, y, x0, vt + " " * (w - 2) + vt, 0)
+            self.add(scr, y, x0 + 2, text, self.c[role] if role else 0)
+        self.add(scr, y0 + hgt - 1, x0, bl + hz * (w - 2) + br, self.c["head"])
 
 
 def window(sel, n, h_):
@@ -638,16 +924,19 @@ def setup_output():
 def main():
     arg = sys.argv[1] if len(sys.argv) > 1 else ""
     setup_output()
-    records, titles = collect()
+    records, titles, unknown = collect()
+    if arg in ("json", "-j", "--json"):
+        print_json(records, titles, unknown)
+        return
     want_text = arg in ("report", "-r", "--report", "text")
     if want_text or not sys.stdout.isatty():
-        print_text(records, titles)
+        print_text(records, titles, unknown)
         return
     try:
-        curses.wrapper(App(records, titles).run)
+        curses.wrapper(App(records, titles, unknown).run)
     except Exception as e:  # фолбэк на текст при любой проблеме с curses
         sys.stderr.write(f"TUI недоступен ({e}); текстовый отчёт:\n")
-        print_text(records, titles)
+        print_text(records, titles, unknown)
 
 
 if __name__ == "__main__":
