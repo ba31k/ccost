@@ -223,6 +223,76 @@ class Collector:
         self.codex_state = {}    # путь -> {sid, proj, model, tools} (стейт файла)
         self.dirty = set()       # записи, которым нужно пересчитать cost
         self.progress = (0, 0)   # (файлов разобрано, всего) — для GUI-прогресса
+        self._saved_at = 0.0
+        self.load_cache()        # тёплый старт: снапшот вместо повторного парса
+
+    # ------------------------------------------------------------ снапшот
+    # Полный парс 1+ГБ JSONL занимает секунды; снапшот разобранного состояния
+    # на диске сводит запуск к долям секунды — дочитываются только новые байты.
+    _REC_FIELDS = ("t", "model", "session", "project", "src", "tin", "tout",
+                   "cw", "cr", "cw1h", "cost", "day", "hour", "wd", "tools")
+
+    @staticmethod
+    def _cache_ver():
+        import zlib
+        tables = json.dumps([PRICE, PRICE_OPENAI], sort_keys=True)
+        return (1, zlib.crc32(tables.encode()))   # смена цен = пересчёт
+
+    @staticmethod
+    def _cache_path():
+        d = os.path.join(os.path.expanduser("~"), ".cache", "ccost")
+        try:
+            os.makedirs(d, exist_ok=True)
+        except OSError:
+            pass
+        return os.path.join(d, "state.pickle")
+
+    def load_cache(self):
+        import pickle
+        try:
+            with open(self._cache_path(), "rb") as fh:
+                data = pickle.load(fh)
+            if data.get("ver") != self._cache_ver():
+                return False
+        except Exception:
+            return False
+        for tup in data["recs"]:
+            r = Rec()
+            for f, v in zip(self._REC_FIELDS, tup):
+                setattr(r, f, v)
+            self.records.append(r)
+        for mid, i in data["mids"].items():
+            self.by_mid[mid] = self.records[i]
+        self.pos = data["pos"]
+        self.titles = data["titles"]
+        self.unknown = data["unknown"]
+        self.seen_tools = data["seen_tools"]
+        self.seen_codex = data["seen_codex"]
+        self.codex_state = data["codex_state"]
+        self._saved_at = time.time()
+        return True
+
+    def save_cache(self):
+        import pickle
+        idx = {id(r): i for i, r in enumerate(self.records)}
+        data = {
+            "ver": self._cache_ver(),
+            "recs": [tuple(getattr(r, f) for f in self._REC_FIELDS)
+                     for r in self.records],
+            "mids": {mid: idx[id(r)] for mid, r in self.by_mid.items()
+                     if isinstance(mid, str) and id(r) in idx},
+            "pos": self.pos, "titles": self.titles, "unknown": self.unknown,
+            "seen_tools": self.seen_tools, "seen_codex": self.seen_codex,
+            "codex_state": self.codex_state,
+        }
+        tmp = self._cache_path() + ".tmp"
+        try:
+            with open(tmp, "wb") as fh:
+                pickle.dump(data, fh, protocol=4)
+            os.replace(tmp, self._cache_path())
+            self._saved_at = time.time()
+        except OSError:
+            pass
 
     def scan(self):
         """Дочитывает новые/изменённые файлы включённых источников.
@@ -275,6 +345,8 @@ class Collector:
                 r.cost = c
             self.dirty.clear()
             changed = True
+        if changed and time.time() - self._saved_at > 300:
+            self.save_cache()      # раз в ~5 минут; потеря — лишь дочитать хвост
         return changed
 
     def _line(self, line):
