@@ -6,20 +6,23 @@
 иначе resume/fork удваивают цифры, а первая строка занижает output) и считает
 стоимость по прайсу API, включая 1-часовой кэш (×2 против ×1.25 у 5-минутного).
 
-  ccost           — интерактивный TUI (вкладки, периоды, сортировка, графики)
+  ccost           — интерактивный TUI (live-режим, мышь, вкладки, периоды)
   ccost report    — полный текстовый отчёт (он же фолбэк для пайпа/не-tty)
   ccost -r        — то же, что report
   ccost json      — агрегаты в JSON (для скриптов)
 """
+import calendar
 import curses
 import glob
 import json
 import locale
 import os
+import re
 import sys
 import textwrap
 import time
-from collections import defaultdict
+import unicodedata
+from collections import Counter, defaultdict
 from datetime import datetime, date, timedelta, timezone
 
 # ---------------------------------------------------------------- прайс / цены
@@ -95,110 +98,187 @@ def fmt_dt(t):
     return datetime.fromtimestamp(t).strftime("%Y-%m-%d %H:%M")
 
 
+ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[0-9A-Za-z]")
+
+
+def clean_text(s):
+    """Заголовки чатов — произвольный пользовательский текст: там встречаются
+    сырые ANSI-коды, эмодзи и CJK. Широкие символы ломают колоночную вёрстку
+    (curses считает ширину по колонкам, python — по кодпоинтам), а старый
+    ncurses на краю экрана режет их в «?» — заменяем на «·», контролы режем."""
+    s = ANSI_RE.sub("", s)
+    out = []
+    for ch in s:
+        if ch == "�" or unicodedata.category(ch)[0] == "C":
+            out.append(" ")            # ZWSP и прочие: пробел, чтобы слова не слипались
+            continue
+        if ord(ch) > 0xFFFF or unicodedata.east_asian_width(ch) in ("W", "F"):
+            out.append("·")
+            continue
+        out.append(ch)
+    return "".join(out)
+
+
 # ---------------------------------------------------------------- сбор данных
 
 class Rec:
     __slots__ = ("t", "model", "session", "project",
                  "tin", "tout", "cw", "cr", "cw1h",
-                 "cost", "day", "hour", "wd")
+                 "cost", "day", "hour", "wd", "tools")
 
 
-def collect():
-    """Проходит все JSONL, дедуплицирует по message.id (пофилдовый максимум).
-    Возвращает (records, titles: session->str, unknown: set[model])."""
-    by_mid = {}
-    records = []
-    titles = {}
-    unknown = set()
-    for fp in glob.glob(os.path.join(ROOT, "**", "*.jsonl"), recursive=True):
+class Collector:
+    """Инкрементальный парсер JSONL: помнит, до какого байта дочитан каждый
+    файл, и на повторном scan() разбирает только дописанное — это и делает
+    возможным live-режим. Дедупликация по message.id (пофилдовый максимум)."""
+
+    def __init__(self):
+        self.by_mid = {}
+        self.records = []
+        self.titles = {}
+        self.unknown = set()
+        self.pos = {}            # путь -> байт, до которого файл разобран
+        self.seen_tools = set()  # id tool_use-блоков (дедуп вызовов)
+        self.dirty = set()       # записи, которым нужно пересчитать cost
+
+    def scan(self):
+        """Дочитывает новые/изменённые файлы. True — данные изменились."""
+        changed = False
+        for fp in glob.glob(os.path.join(ROOT, "**", "*.jsonl"), recursive=True):
+            try:
+                size = os.path.getsize(fp)
+            except OSError:
+                continue
+            done = self.pos.get(fp, 0)
+            if size == done:
+                continue
+            if size < done:
+                done = 0             # файл переписан — читаем заново (дедуп спасает)
+            try:
+                fh = open(fp, "rb")
+            except OSError:
+                continue
+            with fh:
+                fh.seek(done)
+                data = fh.read()
+            end = data.rfind(b"\n") + 1
+            if end == 0:
+                continue             # недописанная строка — дождёмся следующего тика
+            self.pos[fp] = done + end
+            for raw in data[:end].split(b"\n"):
+                if raw and self._line(raw.decode("utf-8", "replace")):
+                    changed = True
+        if self.dirty:
+            for r in self.dirty:
+                c = cost_of(r.model, r.tin, r.tout, r.cw, r.cr, r.cw1h)
+                if c is None:
+                    self.unknown.add(r.model)
+                    c = 0.0
+                r.cost = c
+            self.dirty.clear()
+            changed = True
+        return changed
+
+    def _line(self, line):
+        if '"usage"' not in line and '"type":"user"' not in line \
+                and '"type": "user"' not in line:
+            return False
         try:
-            fh = open(fp, encoding="utf-8", errors="replace")
-        except OSError:
-            continue
-        with fh:
-            for line in fh:
-                if '"usage"' not in line and '"type":"user"' not in line \
-                        and '"type": "user"' not in line:
-                    continue
-                try:
-                    o = json.loads(line)
-                except ValueError:
-                    continue
-                typ = o.get("type")
-                if typ == "user":
-                    _maybe_title(o, titles)
-                    continue
-                if typ != "assistant":
-                    continue
-                m = o.get("message", {})
-                u = m.get("usage")
-                if not u:
-                    continue
-                tin = u.get("input_tokens", 0)
-                tout = u.get("output_tokens", 0)
-                cw = u.get("cache_creation_input_tokens", 0)
-                cr = u.get("cache_read_input_tokens", 0)
-                if tin + tout + cw + cr == 0:
-                    continue                   # синтетические/пустые сообщения
-                cc = u.get("cache_creation") or {}
-                cw1h = cc.get("ephemeral_1h_input_tokens", 0)
-                mid = m.get("id") or object()  # нет id — не дедуплицируем
-                r = by_mid.get(mid)
-                if r is None:
-                    r = Rec()
-                    r.model = m.get("model", "unknown")
-                    r.session = o.get("sessionId", "?")
-                    cwd = o.get("cwd") or ""
-                    r.project = os.path.basename(cwd) or "?"
-                    r.tin, r.tout, r.cw, r.cr, r.cw1h = tin, tout, cw, cr, cw1h
-                    r.t = 0.0
-                    r.day, r.hour, r.wd = "?", -1, -1
-                    by_mid[mid] = r
-                    records.append(r)
-                else:
-                    # стриминг: строки одного сообщения с растущим usage
-                    r.tin = max(r.tin, tin)
-                    r.tout = max(r.tout, tout)
-                    r.cw = max(r.cw, cw)
-                    r.cr = max(r.cr, cr)
-                    r.cw1h = max(r.cw1h, cw1h)
-                if not r.t:
-                    t = parse_ts(o.get("timestamp"))
-                    if t:
-                        r.t = t
-                        lt = datetime.fromtimestamp(t)
-                        r.day = lt.strftime("%Y-%m-%d")
-                        r.hour = lt.hour
-                        r.wd = lt.weekday()
-    for r in records:
-        c = cost_of(r.model, r.tin, r.tout, r.cw, r.cr, r.cw1h)
-        if c is None:
-            unknown.add(r.model)
-            c = 0.0
-        r.cost = c
-    return records, titles, unknown
+            o = json.loads(line)
+        except ValueError:
+            return False
+        typ = o.get("type")
+        if typ == "user":
+            self._maybe_title(o)
+            return False
+        if typ != "assistant":
+            return False
+        m = o.get("message", {})
+        u = m.get("usage")
+        if not u:
+            return False
+        tin = u.get("input_tokens", 0)
+        tout = u.get("output_tokens", 0)
+        cw = u.get("cache_creation_input_tokens", 0)
+        cr = u.get("cache_read_input_tokens", 0)
+        if tin + tout + cw + cr == 0:
+            return False               # синтетические/пустые сообщения
+        cc = u.get("cache_creation") or {}
+        cw1h = cc.get("ephemeral_1h_input_tokens", 0)
+        mid = m.get("id") or object()  # нет id — не дедуплицируем
+        r = self.by_mid.get(mid)
+        touched = False
+        if r is None:
+            r = Rec()
+            r.model = m.get("model", "unknown")
+            r.session = o.get("sessionId", "?")
+            cwd = o.get("cwd") or ""
+            r.project = os.path.basename(cwd) or "?"
+            r.tin, r.tout, r.cw, r.cr, r.cw1h = tin, tout, cw, cr, cw1h
+            r.t = 0.0
+            r.day, r.hour, r.wd = "?", -1, -1
+            r.tools = ()
+            self.by_mid[mid] = r
+            self.records.append(r)
+            touched = True
+        else:
+            # стриминг: строки одного сообщения с растущим usage
+            for f, v in (("tin", tin), ("tout", tout), ("cw", cw),
+                         ("cr", cr), ("cw1h", cw1h)):
+                if v > getattr(r, f):
+                    setattr(r, f, v)
+                    touched = True
+        if not r.t:
+            t = parse_ts(o.get("timestamp"))
+            if t:
+                r.t = t
+                lt = datetime.fromtimestamp(t)
+                r.day = lt.strftime("%Y-%m-%d")
+                r.hour = lt.hour
+                r.wd = lt.weekday()
+        names = self._tool_uses(m.get("content"))
+        if names:
+            r.tools = r.tools + tuple(names)
+            touched = True
+        if touched:
+            self.dirty.add(r)
+        return touched
 
+    def _tool_uses(self, content):
+        if not isinstance(content, list):
+            return []
+        names = []
+        for b in content:
+            if not (isinstance(b, dict) and b.get("type") == "tool_use"):
+                continue
+            bid = b.get("id")
+            if bid:
+                if bid in self.seen_tools:
+                    continue           # дубль из resume/fork
+                self.seen_tools.add(bid)
+            names.append(b.get("name") or "?")
+        return names
 
-def _maybe_title(o, titles):
-    if o.get("isSidechain"):
-        return
-    sid = o.get("sessionId")
-    if not sid or sid in titles:
-        return
-    c = o.get("message", {}).get("content")
-    text = None
-    if isinstance(c, str):
-        text = c
-    elif isinstance(c, list):
-        for b in c:
-            if isinstance(b, dict) and b.get("type") == "text":
-                text = b.get("text")
-                break
-    if not text:
-        return
-    text = " ".join(text.split())
-    if text and not text.startswith("<") and not text.startswith("Caveat"):
-        titles[sid] = text[:80]
+    def _maybe_title(self, o):
+        if o.get("isSidechain"):
+            return
+        sid = o.get("sessionId")
+        if not sid or sid in self.titles:
+            return
+        c = o.get("message", {}).get("content")
+        text = None
+        if isinstance(c, str):
+            text = c
+        elif isinstance(c, list):
+            for b in c:
+                if isinstance(b, dict) and b.get("type") == "text":
+                    text = b.get("text")
+                    break
+        if not text:
+            return
+        text = " ".join(clean_text(text).split())
+        if text and not text.startswith("<") and not text.startswith("Caveat"):
+            self.titles[sid] = text[:80]
 
 
 # ---------------------------------------------------------------- агрегация
@@ -225,13 +305,57 @@ def aggregate(records, keyfn):
     return d
 
 
+def tools_agg(records):
+    """Счётчик вызовов инструментов; стоимость сообщения делится поровну
+    между его вызовами (приблизительная атрибуция)."""
+    d = {}
+    for r in records:
+        if not r.tools:
+            continue
+        n = len(r.tools)
+        for name, c in Counter(r.tools).items():
+            a = d.setdefault(name, {"calls": 0, "msgs": 0, "cost": 0.0})
+            a["calls"] += c
+            a["msgs"] += 1
+            a["cost"] += r.cost * c / n
+    return d
+
+
 def top_model(a):
     return max(a["mc"].items(), key=lambda kv: kv[1])[0] if a["mc"] else "?"
+
+
+def cache_saved(records):
+    """Сколько сэкономил кэш против мира без кэша (чтения по полной цене,
+    но и без наценок за запись)."""
+    saved = 0.0
+    for r in records:
+        p = price_for(r.model)
+        if not p:
+            continue
+        ci = p[0] / 1e6
+        cw5 = max(r.cw - r.cw1h, 0)
+        saved += (r.cr * ci * (1 - CACHE_READ)
+                  - cw5 * ci * (CACHE_W_5M - 1)
+                  - r.cw1h * ci * (CACHE_W_1H - 1))
+    return saved
+
+
+def streak_of(days):
+    d = date.today()
+    if d.isoformat() not in days:
+        d -= timedelta(days=1)
+    n = 0
+    while d.isoformat() in days:
+        n += 1
+        d -= timedelta(days=1)
+    return n
 
 
 def overview(records):
     if not records:
         return None
+    now = time.time()
     total_cost = sum(r.cost for r in records)
     total_tok = sum(r.tin + r.tout + r.cw + r.cr for r in records)
     tin = sum(r.tin for r in records)
@@ -246,7 +370,11 @@ def overview(records):
     models = aggregate(records, lambda r: r.model)
     top_m = max(models.items(), key=lambda kv: kv[1]["cost"]) if models else ("?", {"cost": 0})
     dd = sorted(days) if days else []
-    today = datetime.now().strftime("%Y-%m-%d")
+    t = datetime.now()
+    today = t.strftime("%Y-%m-%d")
+    m0 = datetime(t.year, t.month, 1).timestamp()
+    mtd = sum(r.cost for r in records if r.t >= m0)
+    dim = calendar.monthrange(t.year, t.month)[1]
     return {
         "cost": total_cost, "tok": total_tok,
         "tin": tin, "tout": tout, "cw": cw, "cr": cr,
@@ -258,6 +386,11 @@ def overview(records):
         "top_model": top_m,
         "avg_day": total_cost / len(days) if days else 0,
         "today": days[today]["cost"] if today in days else 0.0,
+        "hour_cost": sum(r.cost for r in records if r.t >= now - 3600),
+        "saved": cache_saved(records),
+        "mtd": mtd,
+        "forecast": mtd / t.day * dim,
+        "streak": streak_of(days),
         "cache_share": (cr / total_tok * 100) if total_tok else 0,
         "days": days,
     }
@@ -361,7 +494,8 @@ def spark_level(v, mx):
 
 # ---------------------------------------------------------------- текстовый режим
 
-def print_text(records, titles, unknown):
+def print_text(co):
+    records, titles, unknown = co.records, co.titles, co.unknown
     ov = overview(records)
     if not ov:
         print("нет данных")
@@ -369,12 +503,16 @@ def print_text(records, titles, unknown):
     print()
     print(f"  ВСЕГО   {ov['tok']:,} токенов   ≈ {money(ov['cost'])} (по прайсу API)")
     print(f"          {ov['msgs']:,} сообщений · {ov['sessions']} чатов · "
-          f"{ov['ndays']} дней ({ov['first']} … {ov['last']})")
+          f"{ov['ndays']} дней ({ov['first']} … {ov['last']}) · "
+          f"стрик {ov['streak']} дн.")
     bd, bh = ov["busiest_day"], ov["peak_hour"]
     peak = f"{bh[0]:02d}:00" if bh[0] >= 0 else "—"
     print(f"          пик дня: {bd[0]} ({money(bd[1]['cost'])}) · "
           f"пик часа: {peak} · ${ov['avg_day']:.2f}/день · "
           f"сегодня {money(ov['today'])} · кэш-чтения {ov['cache_share']:.1f}% токенов")
+    print(f"          кэш сэкономил ≈ {money(ov['saved'])} "
+          f"(без кэша ≈ {money(ov['cost'] + ov['saved'])}) · "
+          f"прогноз на месяц {money(ov['forecast'])}")
     if unknown:
         print(f"          нет прайса (стоимость = $0): {', '.join(sorted(unknown))}")
 
@@ -400,6 +538,15 @@ def print_text(records, titles, unknown):
     table("ЧАТЫ", chats,
           lambda k, a: titles.get(k, "(" + k[:8] + ")"), showmodel=True)
     table("ПРОЕКТЫ", aggregate(records, lambda r: r.project), lambda k, a: k)
+    tools = tools_agg(records)
+    if tools:
+        rows = sorted(tools.items(), key=lambda kv: -kv[1]["calls"])[:15]
+        mx = rows[0][1]["calls"] or 1
+        print("\n  ИНСТРУМЕНТЫ (по вызовам)")
+        print("  " + "-" * 72)
+        for k, a in rows:
+            print(f"  {k[:30]:30} {bar(a['calls'] / mx, 14):14} "
+                  f"{a['calls']:>7,} {money(a['cost']):>11}")
     hours = aggregate([r for r in records if r.hour >= 0], lambda r: r.hour)
     print("\n  ЧАСЫ (по $, локальное время)")
     print("  " + "-" * 72)
@@ -411,7 +558,8 @@ def print_text(records, titles, unknown):
     print()
 
 
-def print_json(records, titles, unknown):
+def print_json(co):
+    records, titles, unknown = co.records, co.titles, co.unknown
     ov = overview(records)
 
     def pack(agg, namefn=None, sort=True):
@@ -441,6 +589,9 @@ def print_json(records, titles, unknown):
             "cache_write": ov["cw"], "cache_read": ov["cr"],
             "msgs": ov["msgs"], "sessions": ov["sessions"],
             "days": ov["ndays"], "first": ov["first"], "last": ov["last"],
+            "cache_saved": round(ov["saved"], 4),
+            "forecast_month": round(ov["forecast"], 4),
+            "streak_days": ov["streak"],
         },
         "unknown_models": sorted(unknown),
         "models": pack(aggregate(records, lambda r: r.model)),
@@ -448,6 +599,12 @@ def print_json(records, titles, unknown):
         "chats": pack(aggregate(records, lambda r: r.session),
                       namefn=lambda k: titles.get(k, "")),
         "projects": pack(aggregate(records, lambda r: r.project)),
+        "tools": [
+            {"key": k, "calls": a["calls"], "msgs": a["msgs"],
+             "cost": round(a["cost"], 4)}
+            for k, a in sorted(tools_agg(records).items(),
+                               key=lambda kv: -kv[1]["calls"])
+        ],
         "hours": pack(aggregate([r for r in records if r.hour >= 0],
                                 lambda r: r.hour), sort=False),
     }
@@ -457,24 +614,26 @@ def print_json(records, titles, unknown):
 
 # ---------------------------------------------------------------- TUI (curses)
 
-TABS = ["Обзор", "Модели", "Дни", "Чаты", "Проекты", "Часы", "Неделя"]
+TABS = ["Обзор", "Модели", "Дни", "Чаты", "Проекты", "Тулзы", "Часы", "Неделя"]
 WDAYS = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"]
+TABLE_TABS = (1, 2, 3, 4, 5)
 
 
 class App:
-    def __init__(self, records, titles, unknown):
-        self.records = records
-        self.titles = titles
-        self.unknown = unknown
+    def __init__(self, collector):
+        self.co = collector
         self.tab = 0
         self.period = 0
         self.sortkey = "cost"          # cost | tok
         self.sel = [0] * len(TABS)
         self.detail = None             # (tab, key) — открытая карточка
+        self.live = True               # автообновление каждые ~2 c
+        self._off = 0                  # прокрутка текущей таблицы (для мыши)
+        self._tab_spans = []           # x-диапазоны вкладок (для мыши)
         self.recompute()
 
     def recompute(self):
-        self.f = apply_period(self.records, self.period)
+        self.f = apply_period(self.co.records, self.period)
         self.ov = overview(self.f)
         self.ag_models = aggregate(self.f, lambda r: r.model)
         days = aggregate(self.f, lambda r: r.day)
@@ -482,6 +641,7 @@ class App:
         self.ag_days = days
         self.ag_chats = aggregate(self.f, lambda r: r.session)
         self.ag_proj = aggregate(self.f, lambda r: r.project)
+        self.ag_tools = tools_agg(self.f)
         self.ag_hours = aggregate([r for r in self.f if r.hour >= 0], lambda r: r.hour)
         heat = defaultdict(float)
         for r in self.f:
@@ -504,28 +664,50 @@ class App:
         if tab == 4:
             return self.sorted_rows(self.ag_proj)
         if tab == 5:
+            key = (lambda kv: -kv[1]["calls"]) if self.sortkey == "tok" \
+                else (lambda kv: -kv[1]["cost"])
+            return sorted(self.ag_tools.items(), key=key)
+        if tab == 6:
             return [(hh, self.ag_hours.get(hh)) for hh in range(24)]
         return []
 
     # ------------------------------------------------------------ цикл
     def run(self, scr):
         curses.curs_set(0)
-        scr.timeout(-1)
+        scr.timeout(2000)              # тик live-режима
+        try:
+            curses.mousemask(curses.ALL_MOUSE_EVENTS)
+        except curses.error:
+            pass
         self._init_colors()
         while True:
             self.draw(scr)
-            ch = scr.getch()
+            while True:
+                ch = scr.getch()
+                if ch != -1:
+                    break
+                if self.live and self.co.scan():
+                    self.recompute()
+                    ch = -1
+                    break
+            if ch == -1:               # live-тик с новыми данными
+                continue
             if ch == ord("r"):
                 self.reload(scr)
+                continue
+            if ch == ord("p"):
+                self.live = not self.live
                 continue
             if not self.handle(ch):
                 break
 
     def reload(self, scr):
         maxy, maxx = scr.getmaxyx()
-        self.add(scr, maxy - 1, 1, "обновление данных…".ljust(maxx - 2), self.c["head"])
+        self.add(scr, maxy - 1, 1, "перечитываю всё с нуля…".ljust(maxx - 2),
+                 self.c["head"])
         scr.refresh()
-        self.records, self.titles, self.unknown = collect()
+        self.co = Collector()
+        self.co.scan()
         self.recompute()
 
     def _init_colors(self):
@@ -584,13 +766,24 @@ class App:
 
     def handle(self, ch):
         if self.detail is not None:
+            if ch == curses.KEY_MOUSE:
+                try:
+                    _, _, _, _, bs = curses.getmouse()
+                except curses.error:
+                    return True
+                if bs & (curses.BUTTON1_CLICKED | curses.BUTTON1_PRESSED
+                         | curses.BUTTON1_DOUBLE_CLICKED):
+                    self.detail = None
+                return True
             if ch in (27, ord("q"), curses.KEY_ENTER, 10, 13):
                 self.detail = None
             return True
         if ch in (ord("q"), 27):
             return False
         n = len(TABS)
-        if ch in (curses.KEY_RIGHT, ord("l"), ord("]"), ord("\t")):
+        if ch == curses.KEY_MOUSE:
+            self._mouse()
+        elif ch in (curses.KEY_RIGHT, ord("l"), ord("]"), ord("\t")):
             self.tab = (self.tab + 1) % n
         elif ch in (curses.KEY_LEFT, ord("h"), ord("[")):
             self.tab = (self.tab - 1) % n
@@ -608,7 +801,7 @@ class App:
             self.sel[self.tab] = 0
         elif ch in (curses.KEY_END, ord("G")):
             self.sel[self.tab] = 10 ** 9      # прижмётся в draw_table
-        elif ch in (curses.KEY_ENTER, 10, 13) and self.tab in (1, 2, 3, 4):
+        elif ch in (curses.KEY_ENTER, 10, 13) and self.tab in TABLE_TABS:
             rows = self.rows_for(self.tab)
             if rows:
                 sel = min(self.sel[self.tab], len(rows) - 1)
@@ -622,6 +815,38 @@ class App:
         elif ch == ord("s"):
             self.sortkey = "tok" if self.sortkey == "cost" else "cost"
         return True
+
+    def _mouse(self):
+        try:
+            _, mx, my, _, bs = curses.getmouse()
+        except curses.error:
+            return
+        b5 = getattr(curses, "BUTTON5_PRESSED", 0x200000)
+        if bs & curses.BUTTON4_PRESSED:                       # колесо вверх
+            self.sel[self.tab] = max(0, self.sel[self.tab] - 3)
+            return
+        if bs & b5:                                           # колесо вниз
+            self.sel[self.tab] += 3
+            return
+        if not bs & (curses.BUTTON1_CLICKED | curses.BUTTON1_PRESSED
+                     | curses.BUTTON1_DOUBLE_CLICKED):
+            return
+        if my == 1:                                           # клик по вкладке
+            for i, (x0, x1) in enumerate(self._tab_spans):
+                if x0 <= mx < x1:
+                    self.tab = i
+                    return
+            return
+        if my >= 4 and self.tab in TABLE_TABS:                # клик по строке
+            rows = self.rows_for(self.tab)
+            idx = self._off + (my - 4)
+            if 0 <= idx < len(rows):
+                if idx == self.sel[self.tab] \
+                        or bs & curses.BUTTON1_DOUBLE_CLICKED:
+                    self.sel[self.tab] = idx
+                    self.detail = (self.tab, rows[idx][0])    # второй клик = карточка
+                else:
+                    self.sel[self.tab] = idx
 
     def add(self, scr, y, x, s, attr=0):
         maxy, maxx = scr.getmaxyx()
@@ -640,15 +865,21 @@ class App:
         cost = money(head["cost"]) if head else "$0.00"
         toks = h(head["tok"]) if head else "0"
         self.add(scr, 0, 1, "ccost", curses.A_BOLD)
+        if self.live:
+            self.add(scr, 0, 7, "live", self.c["money"])
+        else:
+            self.add(scr, 0, 7, "пауза", self.c["dim"] | curses.A_REVERSE)
         right = f"{toks} токенов · {cost} · период: {PERIODS[self.period]}"
-        self.add(scr, 0, max(8, maxx - len(right) - 2), right, self.c["dim"])
+        self.add(scr, 0, max(14, maxx - len(right) - 2), right, self.c["dim"])
         # вкладки
         x = 1
+        self._tab_spans = []
         for i, name in enumerate(TABS):
             label = f" {i+1}·{name} "
+            self._tab_spans.append((x, x + len(label)))
             attr = self.c["tab"] | curses.A_BOLD if i == self.tab else curses.A_DIM
             self.add(scr, 1, x, label, attr)
-            x += len(label) + 1
+            x += len(label)
         self.add(scr, 2, 1, SEP * (maxx - 2), self.c["dim"])
         body_top = 3
         body_h = maxy - body_top - 1
@@ -658,17 +889,19 @@ class App:
         elif self.tab == 0:
             self.draw_overview(scr, body_top, body_h, maxx)
         elif self.tab == 5:
-            self.draw_hours(scr, body_top, body_h, maxx)
+            self.draw_tools(scr, body_top, body_h, maxx)
         elif self.tab == 6:
+            self.draw_hours(scr, body_top, body_h, maxx)
+        elif self.tab == 7:
             self.draw_heat(scr, body_top, body_h, maxx)
         else:
             self.draw_table(scr, body_top, body_h, maxx)
         if self.detail is not None:
             self.draw_detail(scr, maxy, maxx)
-            foot = "Esc/Enter — закрыть карточку"
+            foot = "Esc/Enter/клик — закрыть карточку"
         else:
-            foot = ("←→/1-7 вкладки · ↑↓ скролл · Enter детали · f период · "
-                    "s сорт(%s) · r обновить · q выход" % self.sortkey)
+            foot = ("1-8 · ↑↓ · Enter карточка · f период · s сорт(%s) · "
+                    "p live · r перечитать · q выход" % self.sortkey)
         self.add(scr, maxy - 1, 1, foot, self.c["dim"])
         scr.refresh()
 
@@ -682,13 +915,17 @@ class App:
         lines = [
             ("сообщений", f"{o['msgs']:,}"),
             ("чатов", f"{o['sessions']:,}"),
-            ("активных дней", f"{o['ndays']}  ({o['first']} … {o['last']})"),
+            ("активных дней", f"{o['ndays']}  ({o['first']} … {o['last']}) · "
+                              f"стрик {o['streak']} дн."),
             ("в среднем / день", money(o["avg_day"])),
-            ("сегодня", money(o["today"])),
+            ("сегодня", f"{money(o['today'])} · за час {money(o['hour_cost'])}"),
+            ("прогноз на месяц", f"{money(o['forecast'])} (факт {money(o['mtd'])})"),
             ("пик дня", f"{o['busiest_day'][0]}  ({money(o['busiest_day'][1]['cost'])})"),
             ("пик часа", peak),
             ("топ-модель", o["top_model"][0].replace("claude-", "")),
             ("кэш-чтения", f"{o['cache_share']:.1f}% всех токенов"),
+            ("кэш сэкономил", f"≈ {money(o['saved'])} "
+                              f"(без кэша ≈ {money(o['cost'] + o['saved'])})"),
         ]
         for name, val in lines:
             self.add(scr, y, 2, f"{name:>18} :", self.c["dim"])
@@ -700,9 +937,10 @@ class App:
                  f"input {h(o['tin'])} · cache-wr {h(o['cw'])} · "
                  f"cache-rd {h(o['cr'])} · output {h(o['tout'])}")
         y += 1
-        if self.unknown:
+        if self.co.unknown:
             self.add(scr, y, 2,
-                     "нет прайса (стоимость = $0): " + ", ".join(sorted(self.unknown)),
+                     "нет прайса (стоимость = $0): "
+                     + ", ".join(sorted(self.co.unknown)),
                      self.c["head"])
             y += 1
         y += 1
@@ -722,7 +960,7 @@ class App:
     def draw_table(self, scr, top, h_, maxx):
         rows = self.rows_for(self.tab)
         sel = self.sel[self.tab] = min(self.sel[self.tab], max(0, len(rows) - 1))
-        off = window(sel, len(rows), h_ - 1)
+        off = self._off = window(sel, len(rows), h_ - 1)
         mx = max((tok(a) for _, a in rows), default=1) or 1
         title = {1: "модель", 2: "день", 3: "чат", 4: "проект"}[self.tab]
         self.add(scr, top, 2, title, self.c["head"])
@@ -745,7 +983,7 @@ class App:
             if self.tab == 1:
                 name = k.replace("claude-", "")
             elif self.tab == 3:
-                name = self.titles.get(k) or f"({k[:8]})"
+                name = self.co.titles.get(k) or f"({k[:8]})"
             else:
                 name = k
             mark = "> " if selected else "  "
@@ -756,6 +994,39 @@ class App:
             self.add(scr, y, maxx - 13, f"{money(a['cost']):>11}", a_mon)
         if len(rows) > h_ - 1:
             self.add(scr, top, maxx - 46, f"[{sel + 1}/{len(rows)}]", self.c["dim"])
+
+    def draw_tools(self, scr, top, h_, maxx):
+        rows = self.rows_for(5)
+        if not rows:
+            self.add(scr, top + 1, 2, "вызовов инструментов не найдено")
+            return
+        sel = self.sel[5] = min(self.sel[5], len(rows) - 1)
+        off = self._off = window(sel, len(rows), h_ - 1)
+        mx = max(a["calls"] for _, a in rows) or 1
+        self.add(scr, top, 2, "инструмент", self.c["head"])
+        self.add(scr, top, maxx - 41, f"{'вызовы':>8}{'сообщ.':>9}",
+                 self.c["head"] | curses.A_DIM)
+        self.add(scr, top, maxx - 13, "$≈", self.c["head"])
+        namew = max(12, maxx - 59)
+        bx = 2 + namew + 1
+        bw = max(0, min(12, maxx - 42 - bx))
+        for i in range(off, min(len(rows), off + h_ - 1)):
+            k, a = rows[i]
+            y = top + 1 + (i - off)
+            selected = i == sel
+            if selected:
+                self.add(scr, y, 1, " " * (maxx - 2), self.c["sel"])
+            a_txt = self.c["sel"] if selected else 0
+            a_bar = self.c["sel"] if selected else self.c["bar"]
+            a_dim = self.c["sel"] if selected else self.c["dim"]
+            a_mon = self.c["sel"] if selected else self.c["money"]
+            mark = "> " if selected else "  "
+            self.add(scr, y, 1, f"{mark}{k}"[:namew + 1].ljust(namew + 1), a_txt)
+            self.add(scr, y, bx, bar(a["calls"] / mx, bw), a_bar)
+            self.add(scr, y, maxx - 41, f"{a['calls']:>8,}{a['msgs']:>9,}", a_dim)
+            self.add(scr, y, maxx - 13, f"{money(a['cost']):>11}", a_mon)
+        if len(rows) > h_ - 1:
+            self.add(scr, top, maxx - 51, f"[{sel + 1}/{len(rows)}]", self.c["dim"])
 
     def draw_hours(self, scr, top, h_, maxx):
         self.add(scr, top, 2, "активность по часам (локальное время)", self.c["head"])
@@ -802,6 +1073,8 @@ class App:
 
     # ------------------------------------------------------------ карточка
     def _detail_records(self, tab, key):
+        if tab == 5:
+            return [r for r in self.f if key in r.tools]
         fld = {1: "model", 2: "day", 3: "session", 4: "project"}[tab]
         return [r for r in self.f if getattr(r, fld) == key]
 
@@ -811,11 +1084,11 @@ class App:
         if not sub:
             self.detail = None
             return
-        kind = {1: "модель", 2: "день", 3: "чат", 4: "проект"}[tab]
+        kind = {1: "модель", 2: "день", 3: "чат", 4: "проект", 5: "инструмент"}[tab]
         if tab == 1:
             name = key.replace("claude-", "")
         elif tab == 3:
-            name = self.titles.get(key) or "(без названия)"
+            name = self.co.titles.get(key) or "(без названия)"
         else:
             name = key
         total = sum(r.cost for r in sub)
@@ -837,8 +1110,13 @@ class App:
             ns = len({r.session for r in sub})
             lines.append((f"чатов: {ns}", "dim"))
         lines.append(("", ""))
-        lines.append((f"{money(total)} · {len(sub):,} сообщений · "
-                      f"{money(total / len(sub))}/сообщение", "money"))
+        if tab == 5:
+            calls = sum(r.tools.count(key) for r in sub)
+            lines.append((f"{calls:,} вызовов · {len(sub):,} сообщений · "
+                          f"{money(total)} в этих сообщениях", "money"))
+        else:
+            lines.append((f"{money(total)} · {len(sub):,} сообщений · "
+                          f"{money(total / len(sub))}/сообщение", "money"))
         if ts:
             t0, t1 = min(ts), max(ts)
             if tab == 3:
@@ -858,7 +1136,7 @@ class App:
         else:
             agg = aggregate(sub, lambda r: r.session)
             lines.append(("топ-чаты:", "head"))
-            namef = lambda k: self.titles.get(k) or "(" + str(k)[:8] + ")"
+            namef = lambda k: self.co.titles.get(k) or "(" + str(k)[:8] + ")"
         rows = sorted(agg.items(), key=lambda kv: -kv[1]["cost"])[:5]
         mxc = rows[0][1]["cost"] or 1 if rows else 1
         nw = inner - 25
@@ -924,19 +1202,20 @@ def setup_output():
 def main():
     arg = sys.argv[1] if len(sys.argv) > 1 else ""
     setup_output()
-    records, titles, unknown = collect()
+    co = Collector()
+    co.scan()
     if arg in ("json", "-j", "--json"):
-        print_json(records, titles, unknown)
+        print_json(co)
         return
     want_text = arg in ("report", "-r", "--report", "text")
     if want_text or not sys.stdout.isatty():
-        print_text(records, titles, unknown)
+        print_text(co)
         return
     try:
-        curses.wrapper(App(records, titles, unknown).run)
+        curses.wrapper(App(co).run)
     except Exception as e:  # фолбэк на текст при любой проблеме с curses
         sys.stderr.write(f"TUI недоступен ({e}); текстовый отчёт:\n")
-        print_text(records, titles, unknown)
+        print_text(co)
 
 
 if __name__ == "__main__":
