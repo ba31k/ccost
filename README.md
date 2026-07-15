@@ -27,8 +27,9 @@ ccost
 ## Готовые бинарники
 
 В [релизах](../../releases) лежат standalone-сборки (Python не нужен):
-macOS universal2, Linux x86_64, Windows x64. Собираются GitHub Actions
-на тег `v*` (`.github/workflows/release.yml`).
+`ccost-macos.dmg` (приложение), CLI-бинарники macOS universal2,
+Linux x86_64/arm64 и Windows x64. Собираются GitHub Actions на тег `v*`
+(`.github/workflows/release.yml`).
 
 ## Платформы
 
@@ -111,8 +112,9 @@ sh macos/build.sh                          # соберёт macos/dist/ccost.app
 cp -R macos/dist/ccost.app /Applications/
 ```
 
-Готовый `ccost-macos-app.zip` есть в релизах (не подписан — после
-скачивания: `xattr -dr com.apple.quarantine ccost.app`).
+Готовый `ccost-macos.dmg` есть в релизах: открыть, перетащить в
+Applications (не подписан — при блокировке Гейткипером:
+`xattr -dr com.apple.quarantine /Applications/ccost.app`).
 
 ## Как считает
 
