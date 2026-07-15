@@ -48,10 +48,21 @@ jobs:
       - name: Смоук-тест
         shell: bash
         run: ./dist/${{ matrix.asset }} json > /dev/null
+      - name: ccost.app (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          sh macos/build.sh
+          ditto -c -k --keepParent macos/dist/ccost.app dist/ccost-macos-app.zip
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.asset }}
           path: dist/${{ matrix.asset }}
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'macOS'
+        with:
+          name: ccost-macos-app
+          path: dist/ccost-macos-app.zip
           if-no-files-found: error
 
   release:
@@ -73,7 +84,8 @@ jobs:
 
             | файл | система |
             |---|---|
-            | `ccost-macos-universal2` | macOS (Apple Silicon + Intel) |
+            | `ccost-macos-app.zip` | macOS-приложение (окно с live-дашбордом) |
+            | `ccost-macos-universal2` | macOS CLI (Apple Silicon + Intel) |
             | `ccost-linux-x86_64` | Linux x86_64 |
             | `ccost-windows-x64.exe` | Windows x64 |
 

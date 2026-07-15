@@ -1081,7 +1081,7 @@ setInterval(tick, 3000);
 """
 
 
-def serve_gui(co, port=0):
+def serve_gui(co, port=0, open_browser=True):
     from http.server import BaseHTTPRequestHandler, HTTPServer
     from urllib.parse import urlparse, parse_qs
     import webbrowser
@@ -1124,8 +1124,10 @@ def serve_gui(co, port=0):
 
     srv = HTTPServer(("127.0.0.1", port), H)
     url = f"http://127.0.0.1:{srv.server_address[1]}/"
-    print(f"ccost gui: {url}  (Ctrl-C — выход)")
-    webbrowser.open(url)
+    # flush обязателен: ccost.app читает URL из пайпа
+    print(f"ccost gui: {url}  (Ctrl-C — выход)", flush=True)
+    if open_browser:
+        webbrowser.open(url)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
@@ -1745,8 +1747,9 @@ def main():
         print_json(co)
         return
     if arg in ("gui", "web", "-g"):
-        port = int(sys.argv[2]) if len(sys.argv) > 2 and sys.argv[2].isdigit() else 0
-        serve_gui(co, port)
+        rest = sys.argv[2:]
+        port = next((int(a) for a in rest if a.isdigit()), 0)
+        serve_gui(co, port, open_browser="--no-open" not in rest)
         return
     want_text = arg in ("report", "-r", "--report", "text")
     if want_text or not sys.stdout.isatty():
