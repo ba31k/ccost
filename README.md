@@ -11,6 +11,7 @@
 ```sh
 ./ccost              # интерактивный TUI (live-режим: цифры растут сами)
 ./ccost gui          # live-дашборд в браузере (см. ниже)
+./ccost app          # то же, но отдельным окном-приложением (Win/Linux/mac)
 ./ccost report       # полный текстовый отчёт (он же фолбэк для пайпа / не-tty)
 ./ccost -r           # то же, что report
 ./ccost json         # агрегаты в JSON — для jq / скриптов
@@ -34,10 +35,19 @@ macOS universal2, Linux x86_64, Windows x64. Собираются GitHub Actions
 Один и тот же файл работает везде, где есть Claude Code:
 
 - **macOS / Linux / WSL** — из коробки, ничего ставить не нужно.
-- **Windows** — `report` и `json` работают сразу (`python ccost report`);
+- **Windows** — `report`, `json`, `gui` и `app` работают сразу
+  (`python ccost gui` или готовый `ccost-windows-x64.exe` из релизов);
   для TUI поставь curses-порт: `pip install windows-curses`.
-  Графика по умолчанию ASCII (кодировка консоли непредсказуема);
+  Графика TUI по умолчанию ASCII (кодировка консоли непредсказуема);
   в Windows Terminal можно включить юникодные бары: `set CCOST_UTF8=1`.
+- **`ccost app`** — дашборд отдельным окном без браузерного хрома:
+  на Windows через предустановленный Edge, на Linux — chromium/chrome/brave,
+  на macOS — Chrome (или нативный `ccost.app`, см. ниже). Если ничего
+  не нашлось — откроется обычная вкладка браузера.
+- **Подсчёт токенов одинаков на всех ОС** — движок один. Если Claude Code
+  живёт в WSL, а ccost запускаешь из Windows, укажи путь к данным:
+  `set CCOST_ROOT=\\wsl.localhost\Ubuntu\home\<user>\.claude\projects`
+  (или просто гоняй линукс-бинарь внутри WSL).
 
 ## TUI
 
