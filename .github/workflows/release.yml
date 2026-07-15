@@ -19,6 +19,9 @@ jobs:
           - os: ubuntu-latest
             asset: ccost-linux-x86_64
             arch_flags: ""
+          - os: ubuntu-24.04-arm
+            asset: ccost-linux-arm64
+            arch_flags: ""
           - os: windows-latest
             asset: ccost-windows-x64.exe
             arch_flags: ""
@@ -48,11 +51,14 @@ jobs:
       - name: Смоук-тест
         shell: bash
         run: ./dist/${{ matrix.asset }} json > /dev/null
-      - name: ccost.app (macOS)
+      - name: ccost.app (macOS, .dmg)
         if: runner.os == 'macOS'
         run: |
           sh macos/build.sh
-          ditto -c -k --keepParent macos/dist/ccost.app dist/ccost-macos-app.zip
+          mkdir -p dmgroot
+          cp -R macos/dist/ccost.app dmgroot/
+          ln -s /Applications dmgroot/Applications
+          hdiutil create -volname ccost -srcfolder dmgroot -ov -format UDZO dist/ccost-macos.dmg
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.asset }}
@@ -61,8 +67,8 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: runner.os == 'macOS'
         with:
-          name: ccost-macos-app
-          path: dist/ccost-macos-app.zip
+          name: ccost-macos-dmg
+          path: dist/ccost-macos.dmg
           if-no-files-found: error
 
   release:
@@ -84,12 +90,14 @@ jobs:
 
             | файл | система |
             |---|---|
-            | `ccost-macos-app.zip` | macOS-приложение (окно с live-дашбордом) |
+            | `ccost-macos.dmg` | macOS-приложение (окно с live-дашбордом) |
             | `ccost-macos-universal2` | macOS CLI (Apple Silicon + Intel) |
             | `ccost-linux-x86_64` | Linux x86_64 |
-            | `ccost-windows-x64.exe` | Windows x64 |
+            | `ccost-linux-arm64` | Linux arm64 |
+            | `ccost-windows-x64.exe` | Windows x64 (`.exe app` — окно-приложение) |
 
-            **macOS**: `chmod +x ccost-macos-universal2`, при блокировке Гейткипером —
-            `xattr -d com.apple.quarantine ccost-macos-universal2` (бинарь не подписан).
-            **Linux**: `chmod +x ccost-linux-x86_64`.
+            **macOS (.dmg)**: открыть, перетащить ccost в Applications; бинарь не
+            подписан — при блокировке: `xattr -dr com.apple.quarantine /Applications/ccost.app`.
+            **macOS (CLI)**: `chmod +x` и `xattr -d com.apple.quarantine` при блокировке.
+            **Linux**: `chmod +x`.
             **Windows**: SmartScreen может предупредить — «Выполнить в любом случае».
