@@ -634,6 +634,7 @@ def gui_payload(co, period, day=None):
     ov = overview(f)
     if not ov:
         return {"total": None, "period": period, "day": day,
+                "root": ROOT, "have_any": bool(co.records),
                 "unknown": sorted(co.unknown)}
     days_agg = aggregate(f_all, lambda r: r.day)
     days_agg.pop("?", None)
@@ -872,15 +873,30 @@ body.chrome-mac header{justify-content:flex-end}
   background:#1c1610; padding:3px 8px; border-radius:6px; align-self:center}
 body.offline #cursor{background:var(--dim); box-shadow:none; animation:none}
 body.chrome-mac .hero{padding-top:16px}
-body.chrome-win header{padding-top:12px; -webkit-user-select:none}
+body.chrome-win header{padding:12px 20px 6px; min-height:46px;
+  -webkit-user-select:none}
+body.chrome-win nav{margin-right:142px}      /* не наезжать на — ▢ ✕ */
 body.chrome-win header > :not(#dragstrip){position:relative; z-index:1}
 body.chrome-win nav{margin-left:auto}
 #dragstrip{position:absolute; inset:0; z-index:0}
-#winctl{display:flex; gap:2px; margin-left:8px}
+#winctl{position:absolute; top:0; right:0; display:flex; z-index:3}
 #winctl button{appearance:none; border:0; background:transparent; color:var(--dim);
-  width:36px; height:27px; border-radius:6px; font:13px var(--mono); cursor:pointer}
-#winctl button:hover{background:#1a222c; color:var(--ink)}
-#winctl button.x:hover{background:#b93a2e; color:#fff}
+  width:44px; height:30px; border-radius:0; font:12px var(--mono); cursor:pointer}
+#winctl button:hover{background:#1d2733; color:var(--ink)}
+#winctl button.x:hover{background:#c42b1c; color:#fff}
+/* тёмные скроллбары (WebView2 иначе рисует системные светлые) */
+::-webkit-scrollbar{width:11px; height:11px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:#232c37; border-radius:6px;
+  border:2px solid var(--bg)}
+::-webkit-scrollbar-thumb:hover{background:#2f3a47}
+/* пустое состояние: данных нет вообще или за период */
+body.nodata .cards, body.nodata .cols, body.nodata main > .panel{display:none}
+#emptybox{border:1px dashed #2a3440; border-radius:10px; padding:38px 26px;
+  text-align:center}
+#emptybox .e1{font:600 15px var(--mono); color:var(--ink); margin-bottom:8px}
+#emptybox .e2{color:var(--dim); font:12.5px var(--mono); margin-top:6px;
+  word-break:break-all}
 @media (prefers-reduced-motion:reduce){
   *{animation:none!important; transition:none!important}
 }
@@ -898,6 +914,7 @@ body.chrome-win nav{margin-left:auto}
     <div class="hero-sub" id="herosub">загрузка…</div>
     <div id="loadbar" hidden><i></i></div>
   </section>
+  <section id="emptybox" hidden></section>
   <div class="warn" id="warn" hidden></div>
   <section class="cards" id="cards"></section>
   <section class="panel">
@@ -1082,13 +1099,34 @@ function stag(el, i, ms){                     // каскадное появле
 function render(d, fresh){
   const t = d.total;
   if (!t){
+    document.body.classList.add("nodata");
     $("herosub").textContent = "нет данных за период";
     $("bignum").textContent = "$0.00"; $("bignum").dataset.v = 0;
+    const eb = $("emptybox");
+    eb.hidden = false;
+    eb.replaceChildren();
+    const line = (cls, txt) => {
+      const el = document.createElement("div");
+      el.className = cls; el.textContent = txt;
+      eb.appendChild(el);
+    };
+    if (d.have_any){
+      line("e1", "за этот период активности не было");
+      line("e2", "переключи период: ← → или свайп по счётчику");
+    } else {
+      line("e1", "данные Claude Code не найдены");
+      line("e2", "смотрел в: " + (d.root || "~/.claude/projects"));
+      line("e2", "если Claude Code живёт в WSL — запусти с переменной " +
+                 "CCOST_ROOT=\\wsl.localhost\Ubuntu\home\<user>\.claude\projects " +
+                 "или используй ccost-linux внутри WSL");
+    }
     for (const id of ["daychart","heat","models","chats","tools","hourchart"])
       $(id).replaceChildren();
     lastSig = null;
     return;
   }
+  document.body.classList.remove("nodata");
+  $("emptybox").hidden = true;
   /* герой + живые «+$» тики */
   const prev = +$("bignum").dataset.v || 0;
   if (!fresh && prev > 0 && t.cost > prev + 0.004 && !reduced)
