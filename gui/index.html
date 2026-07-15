@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ccost</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%230b0e12'/%3E%3Cpath d='M3 10h2v3H3zM6.5 7h2v6h-2zM10 4h2v9h-2z' fill='%232dd4c8'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <div class="brand">ccost <span id="livedot"></span><span id="livelbl">live</span></div>
+  <span id="conn" hidden>нет связи</span>
+  <nav id="periods" aria-label="период"></nav>
+</header>
+<main>
+  <section class="hero" id="hero">
+    <div id="bigcost"><span id="bignum">$0.00</span><span id="cursor"></span></div>
+    <div class="hero-sub" id="herosub">загрузка…</div>
+    <div id="loadbar" hidden><i></i></div>
+  </section>
+  <section id="emptybox" hidden></section>
+  <div class="warn" id="warn" hidden></div>
+  <section class="cards" id="cards"></section>
+  <section class="panel">
+    <h2>стоимость по дням<span id="daysel" hidden></span></h2>
+    <div class="chart" id="daychart"></div>
+    <div class="axis" id="dayaxis"></div>
+  </section>
+  <div class="cols">
+    <section class="panel">
+      <h2>неделя × часы</h2>
+      <div class="heatwrap">
+        <div class="heatdays">пн вт ср чт пт сб вс</div>
+        <div>
+          <div class="heatgrid" id="heat"></div>
+          <div class="heathours"><span>00</span><span>06</span><span>12</span><span>18</span><span>23</span></div>
+        </div>
+      </div>
+    </section>
+    <section class="panel"><h2>модели</h2><div class="rows" id="models"></div></section>
+  </div>
+  <div class="cols">
+    <section class="panel"><h2>топ-чаты</h2><div class="rows" id="chats"></div></section>
+    <section class="panel"><h2>инструменты</h2><div class="rows" id="tools"></div></section>
+  </div>
+  <section class="panel">
+    <h2>часы суток</h2>
+    <div class="chart" id="hourchart" style="height:120px"></div>
+    <div class="axis axis24"><span>00</span><span>06</span><span>12</span><span>18</span><span>23</span></div>
+  </section>
+  <footer>ccost · live-дашборд · периоды: ←/→ или свайп · клик по бару дня — детали дня (Esc — сброс)</footer>
+</main>
+<div id="tip"></div>
+<script src="app.js"></script>
+</body>
+</html>
