@@ -22,6 +22,16 @@ cp ccost ~/bin/      # если ~/bin в PATH
 ccost
 ```
 
+## Платформы
+
+Один и тот же файл работает везде, где есть Claude Code:
+
+- **macOS / Linux / WSL** — из коробки, ничего ставить не нужно.
+- **Windows** — `report` и `json` работают сразу (`python ccost report`);
+  для TUI поставь curses-порт: `pip install windows-curses`.
+  Графика по умолчанию ASCII (кодировка консоли непредсказуема);
+  в Windows Terminal можно включить юникодные бары: `set CCOST_UTF8=1`.
+
 ## TUI
 
 Вкладки: **Обзор · Модели · Дни · Чаты · Проекты · Тулзы · Часы · Неделя**.
