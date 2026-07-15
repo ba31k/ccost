@@ -866,7 +866,11 @@ footer{color:var(--dim); font:11px var(--mono); text-align:center; padding:4px 0
 body.chrome-mac header{padding:13px 13px 8px 92px; min-height:52px;
   -webkit-user-select:none; cursor:default}
 body.chrome-mac nav{align-self:flex-start}   /* зазор сверху == зазору справа */
-body.chrome-mac .brand{position:relative; top:-6px}  /* точно на линию светофоров */
+body.chrome-mac .brand{display:none}         /* окно само себя подписывает */
+body.chrome-mac header{justify-content:flex-end}
+#conn{font:11px var(--mono); color:#e0b072; border:1px solid #4a3620;
+  background:#1c1610; padding:3px 8px; border-radius:6px; align-self:center}
+body.offline #cursor{background:var(--dim); box-shadow:none; animation:none}
 body.chrome-mac .hero{padding-top:16px}
 body.chrome-win header{padding-top:12px; -webkit-user-select:none}
 body.chrome-win header > :not(#dragstrip){position:relative; z-index:1}
@@ -885,6 +889,7 @@ body.chrome-win nav{margin-left:auto}
 <body>
 <header>
   <div class="brand">ccost <span id="livedot"></span><span id="livelbl">live</span></div>
+  <span id="conn" hidden>нет связи</span>
   <nav id="periods" aria-label="период"></nav>
 </header>
 <main>
@@ -1347,9 +1352,13 @@ async function tick(force){
     lastSig = sig;
     $("livedot").classList.remove("off");
     $("livelbl").textContent = "live";
+    $("conn").hidden = true;
+    document.body.classList.remove("offline");
   }catch(e){
     $("livedot").classList.add("off");
     $("livelbl").textContent = "нет связи";
+    $("conn").hidden = false;
+    document.body.classList.add("offline");
   }
   mainEl.classList.remove("dim");
 }
