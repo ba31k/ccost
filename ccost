@@ -18,6 +18,7 @@ import json
 import locale
 import os
 import re
+import shutil
 import sys
 import textwrap
 import time
@@ -47,7 +48,9 @@ CACHE_W_5M = 1.25    # запись в 5-мин ephemeral-кэш = 1.25× input
 CACHE_W_1H = 2.0     # запись в 1-час ephemeral-кэш = 2× input
 CACHE_READ = 0.10    # чтение из кэша = 0.1× input
 
-ROOT = os.path.expanduser("~/.claude/projects")
+# CCOST_ROOT — переопределить папку данных (например, из Windows смотреть
+# в WSL: CCOST_ROOT=\\wsl.localhost\Ubuntu\home\user\.claude\projects)
+ROOT = os.environ.get("CCOST_ROOT") or os.path.expanduser("~/.claude/projects")
 
 TS_FORMATS = ("%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ")
 
@@ -1345,7 +1348,39 @@ setInterval(() => tick(false), 3000);
 """
 
 
-def serve_gui(co, port=0, open_browser=True):
+def find_app_browser():
+    """Chromium-совместимый браузер для оконного режима (--app=URL):
+    на Windows Edge есть всегда, на Linux ищем chromium/chrome/brave."""
+    if sys.platform == "darwin":
+        cands = [
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            "/Applications/Chromium.app/Contents/MacOS/Chromium",
+            "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+            "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+        ]
+        return next((c for c in cands if os.path.exists(c)), None)
+    if os.name == "nt":
+        bases = [os.environ.get("ProgramFiles", r"C:\Program Files"),
+                 os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"),
+                 os.environ.get("LOCALAPPDATA", "")]
+        rels = [r"Microsoft\Edge\Application\msedge.exe",
+                r"Google\Chrome\Application\chrome.exe",
+                r"Chromium\Application\chrome.exe"]
+        for base in bases:
+            for rel in rels:
+                p = os.path.join(base, rel)
+                if base and os.path.exists(p):
+                    return p
+        return None
+    for name in ("chromium", "chromium-browser", "google-chrome",
+                 "google-chrome-stable", "brave-browser", "microsoft-edge"):
+        p = shutil.which(name)
+        if p:
+            return p
+    return None
+
+
+def serve_gui(co, port=0, open_browser=True, app_browser=None):
     from http.server import BaseHTTPRequestHandler, HTTPServer
     from urllib.parse import urlparse, parse_qs
     import threading
@@ -1411,6 +1446,22 @@ def serve_gui(co, port=0, open_browser=True):
     url = f"http://127.0.0.1:{srv.server_address[1]}/"
     # flush обязателен: ccost.app читает URL из пайпа
     print(f"ccost gui: {url}  (Ctrl-C — выход)", flush=True)
+    if app_browser:
+        # оконный режим: отдельный профиль, иначе хром вливается в уже
+        # запущенный процесс и выходит сразу — не отследить закрытие окна
+        import subprocess
+        prof = os.path.join(os.path.expanduser("~"), ".cache", "ccost-webapp")
+        os.makedirs(prof, exist_ok=True)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            subprocess.run([app_browser, f"--app={url}",
+                            f"--user-data-dir={prof}",
+                            "--window-size=1240,860",
+                            "--no-first-run", "--no-default-browser-check"],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except KeyboardInterrupt:
+            pass
+        return
     if open_browser:
         webbrowser.open(url)
     try:
@@ -2031,6 +2082,15 @@ def main():
         rest = sys.argv[2:]
         port = next((int(a) for a in rest if a.isdigit()), 0)
         serve_gui(co, port, open_browser="--no-open" not in rest)
+        return
+    if arg == "app":                    # окно-приложение (Windows/Linux/mac)
+        rest = sys.argv[2:]
+        port = next((int(a) for a in rest if a.isdigit()), 0)
+        b = find_app_browser()
+        if not b:
+            print("не нашёл Chrome/Chromium/Edge — открываю вкладку браузера",
+                  flush=True)
+        serve_gui(co, port, open_browser=b is None, app_browser=b)
         return
     co.scan()
     if arg in ("json", "-j", "--json"):
