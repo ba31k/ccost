@@ -22,6 +22,12 @@ cp ccost ~/bin/      # если ~/bin в PATH
 ccost
 ```
 
+## Готовые бинарники
+
+В [релизах](../../releases) лежат standalone-сборки (Python не нужен):
+macOS universal2, Linux x86_64, Windows x64. Собираются GitHub Actions
+на тег `v*` (`.github/workflows/release.yml`).
+
 ## Платформы
 
 Один и тот же файл работает везде, где есть Claude Code:
