@@ -14,11 +14,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ note: Notification) {
         let rect = NSRect(x: 0, y: 0, width: 1240, height: 860)
         window = NSWindow(contentRect: rect,
-                          styleMask: [.titled, .closable, .miniaturizable,
-                                      .resizable, .fullSizeContentView],
+                          styleMask: [.titled, .closable, .miniaturizable, .resizable],
                           backing: .buffered, defer: false)
         window.title = "ccost"
-        window.titlebarAppearsTransparent = true
+        window.titleVisibility = .hidden          // бренд уже есть в дашборде
+        window.titlebarAppearsTransparent = true  // тёмная полоска для перетаскивания
+        window.isMovableByWindowBackground = true
         window.appearance = NSAppearance(named: .darkAqua)
         window.backgroundColor = BG
         window.minSize = NSSize(width: 720, height: 480)
