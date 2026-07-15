@@ -7,6 +7,7 @@
 стоимость по прайсу API, включая 1-часовой кэш (×2 против ×1.25 у 5-минутного).
 
   ccost           — интерактивный TUI (live-режим, мышь, вкладки, периоды)
+  ccost gui       — live-дашборд в браузере (локальный сервер, ноль зависимостей)
   ccost report    — полный текстовый отчёт (он же фолбэк для пайпа/не-tty)
   ccost -r        — то же, что report
   ccost json      — агрегаты в JSON (для скриптов)
@@ -614,6 +615,521 @@ def print_json(co):
     }
     json.dump(data, sys.stdout, ensure_ascii=False, indent=2)
     print()
+
+
+# ---------------------------------------------------------------- GUI (браузер)
+
+def gui_payload(co, period):
+    """Все данные дашборда одним куском; вызывается на каждый poll."""
+    f = apply_period(co.records, period)
+    ov = overview(f)
+    if not ov:
+        return {"total": None, "period": period, "unknown": sorted(co.unknown)}
+    days_agg = aggregate(f, lambda r: r.day)
+    days_agg.pop("?", None)
+    heat = [[0.0] * 24 for _ in range(7)]
+    for r in f:
+        if r.hour >= 0 and r.wd >= 0:
+            heat[r.wd][r.hour] += r.cost
+    models = [
+        {"name": k.replace("claude-", ""), "cost": round(a["cost"], 2),
+         "tok": tok(a), "out": a["tout"], "msgs": a["msgs"]}
+        for k, a in sorted(aggregate(f, lambda r: r.model).items(),
+                           key=lambda kv: -kv[1]["cost"])
+    ]
+    chats = [
+        {"title": co.titles.get(k) or "(" + str(k)[:8] + ")",
+         "project": next((r.project for r in f if r.session == k), "?"),
+         "model": top_model(a).replace("claude-", ""),
+         "cost": round(a["cost"], 2), "msgs": a["msgs"], "tok": tok(a)}
+        for k, a in sorted(aggregate(f, lambda r: r.session).items(),
+                           key=lambda kv: -kv[1]["cost"])[:14]
+    ]
+    tools = [
+        {"name": k, "calls": a["calls"], "msgs": a["msgs"], "cost": round(a["cost"], 2)}
+        for k, a in sorted(tools_agg(f).items(), key=lambda kv: -kv[1]["calls"])[:12]
+    ]
+    hours_agg = aggregate([r for r in f if r.hour >= 0], lambda r: r.hour)
+    hours = [{"c": round(hours_agg[hh]["cost"], 2) if hh in hours_agg else 0,
+              "m": hours_agg[hh]["msgs"] if hh in hours_agg else 0}
+             for hh in range(24)]
+    return {
+        "period": period,
+        "today_str": datetime.now().strftime("%Y-%m-%d"),
+        "total": {
+            "cost": round(ov["cost"], 2), "tok": ov["tok"],
+            "tin": ov["tin"], "tout": ov["tout"], "cw": ov["cw"], "cr": ov["cr"],
+            "msgs": ov["msgs"], "sessions": ov["sessions"], "ndays": ov["ndays"],
+            "first": ov["first"], "last": ov["last"],
+            "avg_day": round(ov["avg_day"], 2), "today": round(ov["today"], 2),
+            "hour_cost": round(ov["hour_cost"], 2), "saved": round(ov["saved"], 2),
+            "mtd": round(ov["mtd"], 2), "forecast": round(ov["forecast"], 2),
+            "streak": ov["streak"], "cache_share": round(ov["cache_share"], 1),
+            "busiest_day": ov["busiest_day"][0],
+            "busiest_cost": round(ov["busiest_day"][1]["cost"], 2),
+            "peak_hour": ov["peak_hour"][0],
+            "top_model": ov["top_model"][0].replace("claude-", ""),
+        },
+        "days": [{"d": d, "c": round(c, 2)} for d, c in fill_days(days_agg)][-120:],
+        "heat": [[round(v, 2) for v in row] for row in heat],
+        "models": models, "chats": chats, "tools": tools, "hours": hours,
+        "unknown": sorted(co.unknown),
+    }
+
+
+GUI_HTML = r"""<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ccost</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%230b0e12'/%3E%3Cpath d='M3 10h2v3H3zM6.5 7h2v6h-2zM10 4h2v9h-2z' fill='%232dd4c8'/%3E%3C/svg%3E">
+<style>
+:root{
+  --bg:#0b0e12; --panel:#11161d; --panel2:#0e1319; --line:#1d242e;
+  --ink:#e8edf2; --dim:#77828f; --teal:#2dd4c8; --money:#7ee787; --amber:#e8c268;
+  --mono:ui-monospace,"SF Mono",SFMono-Regular,Menlo,Consolas,monospace;
+  --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+html{color-scheme:dark}
+body{
+  background:var(--bg); color:var(--ink); font-family:var(--sans);
+  font-size:14px; line-height:1.45; min-height:100vh;
+}
+body::before{ /* фосфорные сканлайны, едва заметные */
+  content:""; position:fixed; inset:0; pointer-events:none; z-index:0;
+  background:
+    radial-gradient(900px 340px at 24% -60px, rgba(45,212,200,.055), transparent 70%),
+    repeating-linear-gradient(0deg, rgba(255,255,255,.012) 0 1px, transparent 1px 3px);
+}
+main,header{position:relative; z-index:1}
+header{
+  display:flex; align-items:center; justify-content:space-between; gap:16px;
+  max-width:1180px; margin:0 auto; padding:22px 28px 0; flex-wrap:wrap;
+}
+.brand{font-family:var(--mono); font-weight:700; font-size:17px; letter-spacing:.02em;
+  display:flex; align-items:center; gap:10px}
+#livedot{width:8px; height:8px; border-radius:50%; background:var(--money);
+  box-shadow:0 0 8px rgba(126,231,135,.8); animation:pulse 2s ease-in-out infinite}
+#livedot.off{background:var(--dim); box-shadow:none; animation:none}
+@keyframes pulse{50%{opacity:.35}}
+#livelbl{color:var(--dim); font-size:12px; font-family:var(--mono)}
+nav{display:flex; gap:2px; background:var(--panel); border:1px solid var(--line);
+  border-radius:8px; padding:3px}
+nav button{
+  appearance:none; border:0; background:transparent; color:var(--dim);
+  font:12px var(--mono); padding:6px 12px; border-radius:6px; cursor:pointer;
+}
+nav button:hover{color:var(--ink)}
+nav button:focus-visible{outline:1px solid var(--teal)}
+nav button.on{background:#182530; color:var(--teal)}
+main{max-width:1180px; margin:0 auto; padding:10px 28px 48px;
+  display:flex; flex-direction:column; gap:14px}
+.hero{padding:26px 2px 6px}
+#bigcost{
+  font-family:var(--mono); font-weight:700; letter-spacing:-.02em;
+  font-size:clamp(54px,8.5vw,92px); line-height:1; color:var(--money);
+  text-shadow:0 0 34px rgba(126,231,135,.16); font-variant-numeric:tabular-nums;
+}
+.hero-sub{color:var(--dim); margin-top:12px; font-family:var(--mono); font-size:13px}
+.hero-sub b{color:var(--ink); font-weight:600}
+.cards{display:grid; grid-template-columns:repeat(auto-fit,minmax(215px,1fr)); gap:14px}
+.card{background:var(--panel); border:1px solid var(--line); border-radius:10px;
+  padding:14px 16px 12px}
+.card .lbl,.panel h2{
+  font:600 10.5px var(--sans); text-transform:uppercase; letter-spacing:.12em;
+  color:var(--amber);
+}
+.card .val{font:600 25px var(--mono); margin-top:7px; font-variant-numeric:tabular-nums}
+.card .sub{color:var(--dim); font-size:12px; margin-top:3px; font-family:var(--mono)}
+.panel{background:var(--panel); border:1px solid var(--line); border-radius:10px;
+  padding:16px 18px 18px; min-width:0}
+.panel h2{margin-bottom:14px}
+.cols{display:grid; grid-template-columns:1fr 1fr; gap:14px}
+@media (max-width:880px){.cols{grid-template-columns:1fr}}
+/* график по дням */
+.chart{position:relative; height:210px}
+.gridline{position:absolute; left:0; right:0; border-top:1px solid var(--line)}
+.gridline span{position:absolute; right:0; top:-16px; color:var(--dim);
+  font:10.5px var(--mono)}
+.bars{position:absolute; inset:0; display:flex; align-items:flex-end; gap:2px}
+.bars .b{flex:1 1 0; min-width:1px; background:linear-gradient(180deg,#3be3d6,#1a9d94);
+  border-radius:2px 2px 0 0; transition:height .5s ease; cursor:default}
+.bars .b.today{background:linear-gradient(180deg,#f0d084,#c99f45)}
+.bars .b:hover{filter:brightness(1.25)}
+.axis{display:flex; justify-content:space-between; color:var(--dim);
+  font:10.5px var(--mono); margin-top:6px}
+/* хитмап */
+.heatwrap{display:grid; grid-template-columns:26px 1fr; gap:6px; align-items:start}
+.heatdays{display:grid; grid-template-rows:repeat(7,16px); gap:3px;
+  color:var(--dim); font:10.5px var(--mono); line-height:16px}
+.heatgrid{display:grid; grid-template-columns:repeat(24,1fr);
+  grid-auto-rows:16px; gap:3px}
+.heatgrid i{border-radius:3px; background:#161d26}
+.heatgrid i.peak{outline:1px solid var(--amber)}
+.heathours{grid-column:2; display:flex; justify-content:space-between;
+  color:var(--dim); font:10.5px var(--mono); margin-top:2px}
+/* строки-списки */
+.rows{display:flex; flex-direction:column}
+.row{display:grid; grid-template-columns:minmax(0,1fr) auto; gap:4px 14px;
+  padding:8px 6px; border-radius:6px; align-items:center}
+.row:hover{background:var(--panel2)}
+.row+.row{border-top:1px solid var(--line)}
+.row .name{white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+.row .meta{grid-column:1; display:flex; gap:6px; align-items:center; min-width:0}
+.chip{font:10.5px var(--mono); color:var(--dim); background:#161d26;
+  border-radius:4px; padding:1px 6px; white-space:nowrap}
+.row .cost{font:600 14px var(--mono); color:var(--money); text-align:right;
+  grid-column:2; grid-row:1 / span 2; align-self:center;
+  font-variant-numeric:tabular-nums}
+.hbar{position:relative; height:5px; background:#161d26; border-radius:3px;
+  overflow:hidden; grid-column:1}
+.hbar i{position:absolute; inset:0 auto 0 0; background:var(--teal);
+  border-radius:3px; transition:width .5s ease}
+.mrow{display:grid; grid-template-columns:150px 1fr 84px 100px; gap:12px;
+  align-items:center; padding:8px 6px}
+.mrow+.mrow{border-top:1px solid var(--line)}
+.mrow .name{font-family:var(--mono); white-space:nowrap; overflow:hidden;
+  text-overflow:ellipsis}
+.mrow .tok{color:var(--dim); font:12px var(--mono); text-align:right}
+.mrow .cost{font:600 14px var(--mono); color:var(--money); text-align:right;
+  font-variant-numeric:tabular-nums}
+.warn{border:1px solid #4a3620; background:#1c1610; color:#e0b072;
+  border-radius:10px; padding:10px 16px; font-family:var(--mono); font-size:12.5px}
+#tip{position:fixed; pointer-events:none; z-index:10; display:none;
+  background:#050708; border:1px solid var(--line); border-radius:7px;
+  padding:7px 10px; font:12px var(--mono); white-space:nowrap;
+  box-shadow:0 6px 24px rgba(0,0,0,.5)}
+#tip b{color:var(--money)}
+footer{color:var(--dim); font:11px var(--mono); text-align:center; padding:4px 0 26px}
+@media (prefers-reduced-motion:reduce){
+  *{animation:none!important; transition:none!important}
+}
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">ccost <span id="livedot"></span><span id="livelbl">live</span></div>
+  <nav id="periods" aria-label="период"></nav>
+</header>
+<main>
+  <section class="hero">
+    <div id="bigcost">$0.00</div>
+    <div class="hero-sub" id="herosub">загрузка…</div>
+  </section>
+  <div class="warn" id="warn" hidden></div>
+  <section class="cards" id="cards"></section>
+  <section class="panel">
+    <h2>стоимость по дням</h2>
+    <div class="chart" id="daychart"></div>
+    <div class="axis" id="dayaxis"></div>
+  </section>
+  <div class="cols">
+    <section class="panel">
+      <h2>неделя × часы</h2>
+      <div class="heatwrap">
+        <div class="heatdays">пн вт ср чт пт сб вс</div>
+        <div>
+          <div class="heatgrid" id="heat"></div>
+          <div class="heathours"><span>00</span><span>06</span><span>12</span><span>18</span><span>23</span></div>
+        </div>
+      </div>
+    </section>
+    <section class="panel"><h2>модели</h2><div class="rows" id="models"></div></section>
+  </div>
+  <div class="cols">
+    <section class="panel"><h2>топ-чаты</h2><div class="rows" id="chats"></div></section>
+    <section class="panel"><h2>инструменты</h2><div class="rows" id="tools"></div></section>
+  </div>
+  <section class="panel">
+    <h2>часы суток</h2>
+    <div class="chart" id="hourchart" style="height:120px"></div>
+    <div class="axis"><span>00</span><span>06</span><span>12</span><span>18</span><span>23</span></div>
+  </section>
+  <footer>ccost · локальный дашборд · обновляется каждые 3 секунды</footer>
+</main>
+<div id="tip"></div>
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const PERIODS = [["всё",0],["месяц",4],["30 дней",3],["7 дней",2],["сегодня",1]];
+let period = 0;
+const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+const money = x => "$" + x.toLocaleString("en-US",{minimumFractionDigits:2, maximumFractionDigits:2});
+function htok(n){
+  if (n >= 999.5e6) return (n/1e9).toFixed(1)+"B";
+  if (n >= 999.5e3) return (n/1e6).toFixed(1)+"M";
+  if (n >= 1000)    return (n/1e3).toFixed(1)+"K";
+  return String(n);
+}
+
+/* плавный перекат числа */
+function lerpMoney(el, to){
+  const from = +el.dataset.v || 0;
+  el.dataset.v = to;
+  if (reduced || Math.abs(to-from) < 0.005){ el.textContent = money(to); return; }
+  const t0 = performance.now(), dur = 550;
+  (function step(t){
+    const k = Math.min((t-t0)/dur, 1), e = 1-Math.pow(1-k,3);
+    el.textContent = money(from + (to-from)*e);
+    if (k < 1) requestAnimationFrame(step);
+  })(t0);
+}
+
+/* тултип */
+const tip = $("tip");
+function bindTip(el, html){
+  el.addEventListener("mousemove", e => {
+    tip.innerHTML = html; tip.style.display = "block";
+    const w = tip.offsetWidth;
+    tip.style.left = Math.min(e.clientX+14, innerWidth-w-10)+"px";
+    tip.style.top = (e.clientY+16)+"px";
+  });
+  el.addEventListener("mouseleave", () => tip.style.display = "none");
+}
+
+function card(lbl, val, sub){
+  const d = document.createElement("div");
+  d.className = "card";
+  d.innerHTML = '<div class="lbl"></div><div class="val"></div><div class="sub"></div>';
+  d.children[0].textContent = lbl;
+  d.children[1].textContent = val;
+  d.children[2].textContent = sub;
+  return d;
+}
+
+function render(d){
+  const t = d.total;
+  if (!t){
+    $("herosub").textContent = "нет данных за период";
+    $("bigcost").textContent = "$0.00"; $("bigcost").dataset.v = 0;
+    for (const id of ["cards","daychart","heat","models","chats","tools","hourchart"])
+      $(id).replaceChildren();
+    return;
+  }
+  lerpMoney($("bigcost"), t.cost);
+  document.title = "ccost · " + money(t.cost);
+  const hs = $("herosub");
+  hs.replaceChildren();
+  const seg = (txt, strong) => {
+    const b = document.createElement(strong ? "b" : "span");
+    b.textContent = txt; hs.appendChild(b);
+  };
+  seg(htok(t.tok)); seg(" токенов · "); seg(t.msgs.toLocaleString("ru-RU"));
+  seg(" сообщений · "); seg(String(t.sessions)); seg(" чатов · ");
+  seg(t.first + " … " + t.last); seg(" · стрик "); seg(t.streak + " дн.", true);
+
+  const w = $("warn");
+  if (d.unknown.length){
+    w.hidden = false;
+    w.textContent = "нет прайса (стоимость = $0): " + d.unknown.join(", ");
+  } else w.hidden = true;
+
+  const cards = $("cards");
+  cards.replaceChildren(
+    card("сегодня", money(t.today), "за последний час " + money(t.hour_cost)),
+    card("прогноз на месяц", money(t.forecast), "факт " + money(t.mtd)),
+    card("кэш сэкономил", "≈ " + money(t.saved), "без кэша ≈ " + money(t.cost + t.saved)),
+    card("в среднем за день", money(t.avg_day),
+         "пик " + t.busiest_day + " · " + money(t.busiest_cost)),
+  );
+
+  /* дни */
+  const dc = $("daychart");
+  dc.replaceChildren();
+  const mx = Math.max(...d.days.map(x => x.c), 0.01);
+  for (const fr of [1, .5]){
+    const g = document.createElement("div");
+    g.className = "gridline"; g.style.bottom = (fr*100)+"%";
+    g.innerHTML = "<span></span>";
+    g.children[0].textContent = money(mx*fr);
+    dc.appendChild(g);
+  }
+  const bars = document.createElement("div");
+  bars.className = "bars";
+  for (const x of d.days){
+    const b = document.createElement("div");
+    b.className = "b" + (x.d === d.today_str ? " today" : "");
+    b.style.height = Math.max(x.c/mx*100, x.c > 0 ? 1.5 : 0.4) + "%";
+    bindTip(b, esc(x.d) + " · <b>" + money(x.c) + "</b>");
+    bars.appendChild(b);
+  }
+  dc.appendChild(bars);
+  const ax = $("dayaxis");
+  ax.replaceChildren();
+  for (const s of [d.days[0], d.days[d.days.length-1]]){
+    const sp = document.createElement("span");
+    sp.textContent = s ? s.d : ""; ax.appendChild(sp);
+  }
+
+  /* хитмап */
+  const hm = $("heat");
+  hm.replaceChildren();
+  const hmax = Math.max(...d.heat.flat(), 0.01);
+  const wd = ["пн","вт","ср","чт","пт","сб","вс"];
+  document.querySelector(".heatdays").replaceChildren(
+    ...wd.map(x => { const s = document.createElement("span"); s.textContent = x; return s; }));
+  let peak = [0,0,0];
+  d.heat.forEach((row,i) => row.forEach((v,j) => { if (v > peak[2]) peak = [i,j,v]; }));
+  d.heat.forEach((row,i) => row.forEach((v,j) => {
+    const c = document.createElement("i");
+    const a = v <= 0 ? 0 : 0.14 + 0.86*Math.pow(v/hmax, 0.6);
+    if (v > 0) c.style.background = "rgba(45,212,200," + a.toFixed(3) + ")";
+    if (i === peak[0] && j === peak[1] && v > 0) c.className = "peak";
+    bindTip(c, wd[i] + " " + String(j).padStart(2,"0") + ":00 · <b>" + money(v) + "</b>");
+    hm.appendChild(c);
+  }));
+
+  /* модели */
+  const mrows = $("models");
+  mrows.replaceChildren();
+  const mmax = Math.max(...d.models.map(m => m.cost), 0.01);
+  for (const m of d.models){
+    const r = document.createElement("div");
+    r.className = "mrow";
+    r.innerHTML = '<div class="name"></div><div class="hbar"><i></i></div>' +
+                  '<div class="tok"></div><div class="cost"></div>';
+    r.children[0].textContent = m.name;
+    r.children[1].firstChild.style.width = (m.cost/mmax*100)+"%";
+    r.children[2].textContent = htok(m.tok);
+    r.children[3].textContent = money(m.cost);
+    mrows.appendChild(r);
+  }
+
+  /* чаты */
+  const crows = $("chats");
+  crows.replaceChildren();
+  for (const c of d.chats){
+    const r = document.createElement("div");
+    r.className = "row";
+    r.innerHTML = '<div class="name"></div><div class="cost"></div><div class="meta"></div>';
+    r.children[0].textContent = c.title;
+    r.children[1].textContent = money(c.cost);
+    for (const chip of [c.project, c.model, c.msgs.toLocaleString("ru-RU")+" сообщ."]){
+      const s = document.createElement("span");
+      s.className = "chip"; s.textContent = chip;
+      r.children[2].appendChild(s);
+    }
+    crows.appendChild(r);
+  }
+
+  /* инструменты */
+  const trows = $("tools");
+  trows.replaceChildren();
+  const tmax = Math.max(...d.tools.map(x => x.calls), 1);
+  for (const x of d.tools){
+    const r = document.createElement("div");
+    r.className = "row";
+    r.innerHTML = '<div class="name"></div><div class="cost"></div>' +
+                  '<div class="hbar" style="grid-column:1"><i></i></div>';
+    r.children[0].textContent = x.name + " · " + x.calls.toLocaleString("ru-RU");
+    r.children[1].textContent = money(x.cost);
+    r.children[2].firstChild.style.width = (x.calls/tmax*100)+"%";
+    trows.appendChild(r);
+  }
+
+  /* часы */
+  const hc = $("hourchart");
+  hc.replaceChildren();
+  const hcmax = Math.max(...d.hours.map(x => x.c), 0.01);
+  const hbars = document.createElement("div");
+  hbars.className = "bars";
+  d.hours.forEach((x,i) => {
+    const b = document.createElement("div");
+    b.className = "b";
+    b.style.height = Math.max(x.c/hcmax*100, x.c > 0 ? 2 : 0.6) + "%";
+    bindTip(b, String(i).padStart(2,"0") + ":00 · <b>" + money(x.c) + "</b> · " + x.m + " сообщ.");
+    hbars.appendChild(b);
+  });
+  hc.appendChild(hbars);
+}
+
+function esc(s){ const d = document.createElement("i"); d.textContent = s; return d.innerHTML; }
+
+async function tick(){
+  try{
+    const r = await fetch("/data?period=" + period);
+    render(await r.json());
+    $("livedot").classList.remove("off");
+    $("livelbl").textContent = "live";
+  }catch(e){
+    $("livedot").classList.add("off");
+    $("livelbl").textContent = "нет связи";
+  }
+}
+
+const nav = $("periods");
+for (const [name, idx] of PERIODS){
+  const b = document.createElement("button");
+  b.textContent = name;
+  if (idx === period) b.className = "on";
+  b.onclick = () => {
+    period = idx;
+    for (const x of nav.children) x.className = "";
+    b.className = "on";
+    tick();
+  };
+  nav.appendChild(b);
+}
+tick();
+setInterval(tick, 3000);
+</script>
+</body>
+</html>
+"""
+
+
+def serve_gui(co, port=0):
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    from urllib.parse import urlparse, parse_qs
+    import webbrowser
+
+    cache = {}
+
+    def payload(period):
+        if co.scan():
+            cache.clear()
+        if period not in cache:
+            cache[period] = json.dumps(gui_payload(co, period),
+                                       ensure_ascii=False).encode("utf-8")
+        return cache[period]
+
+    class H(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            u = urlparse(self.path)
+            if u.path == "/":
+                body, ctype = GUI_HTML.encode("utf-8"), "text/html; charset=utf-8"
+            elif u.path == "/data":
+                try:
+                    period = int(parse_qs(u.query).get("period", ["0"])[0])
+                except ValueError:
+                    period = 0
+                body = payload(period % len(PERIODS))
+                ctype = "application/json; charset=utf-8"
+            else:
+                self.send_response(404)
+                self.end_headers()
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+
+    srv = HTTPServer(("127.0.0.1", port), H)
+    url = f"http://127.0.0.1:{srv.server_address[1]}/"
+    print(f"ccost gui: {url}  (Ctrl-C — выход)")
+    webbrowser.open(url)
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        pass
 
 
 # ---------------------------------------------------------------- TUI (curses)
@@ -1227,6 +1743,10 @@ def main():
     co.scan()
     if arg in ("json", "-j", "--json"):
         print_json(co)
+        return
+    if arg in ("gui", "web", "-g"):
+        port = int(sys.argv[2]) if len(sys.argv) > 2 and sys.argv[2].isdigit() else 0
+        serve_gui(co, port)
         return
     want_text = arg in ("report", "-r", "--report", "text")
     if want_text or not sys.stdout.isatty():
