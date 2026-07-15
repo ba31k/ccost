@@ -33,7 +33,7 @@ except ImportError:            # Windows без windows-curses: report/json ра
 
 # ---------------------------------------------------------------- прайс / цены
 
-# $ за 1M токенов (input, output) — стандартный прайс API
+# Anthropic: $ за 1M токенов (input, output); кэш-чтение = 0.1× input
 PRICE = {
     "claude-fable-5":            (10, 50),
     "claude-opus-4-8":           (5, 25),
@@ -44,39 +44,110 @@ PRICE = {
     "claude-sonnet-4-6":         (3, 15),
     "claude-haiku-4-5":          (1, 5),
 }
-CACHE_W_5M = 1.25    # запись в 5-мин ephemeral-кэш = 1.25× input
-CACHE_W_1H = 2.0     # запись в 1-час ephemeral-кэш = 2× input
-CACHE_READ = 0.10    # чтение из кэша = 0.1× input
-
-# CCOST_ROOT — переопределить папку данных (например, из Windows смотреть
-# в WSL: CCOST_ROOT=\\wsl.localhost\Ubuntu\home\user\.claude\projects)
-ROOT = os.environ.get("CCOST_ROOT") or os.path.expanduser("~/.claude/projects")
+# OpenAI (Codex): $ за 1M токенов (input, output, cached input) —
+# по developers.openai.com/api/docs/pricing, июль 2026
+PRICE_OPENAI = {
+    "gpt-5.6-sol":   (5.0, 30.0, 0.50),
+    "gpt-5.6-terra": (2.5, 15.0, 0.25),
+    "gpt-5.6-luna":  (1.0, 6.0, 0.10),
+    "gpt-5.5":       (5.0, 30.0, 0.50),
+    "gpt-5.4":       (2.5, 15.0, 0.25),
+    "gpt-5.3-codex": (1.75, 14.0, 0.175),
+    "gpt-5.2-codex": (1.75, 14.0, 0.175),
+    "gpt-5.2":       (1.25, 10.0, 0.125),
+    "gpt-5.1":       (1.25, 10.0, 0.125),
+    "gpt-5-codex":   (1.25, 10.0, 0.125),
+    "gpt-5-mini":    (0.25, 2.0, 0.025),
+    "gpt-5-nano":    (0.05, 0.40, 0.005),
+    "gpt-5":         (1.25, 10.0, 0.125),
+    "codex-5.6-sol": (5.0, 30.0, 0.50),
+}
+CACHE_W_5M = 1.25    # anthropic: запись в 5-мин ephemeral-кэш = 1.25× input
+CACHE_W_1H = 2.0     # anthropic: запись в 1-час ephemeral-кэш = 2× input
+CACHE_READ = 0.10    # anthropic: чтение из кэша = 0.1× input
 
 TS_FORMATS = ("%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ")
 
+# ---------------------------------------------------------------- конфиг
+
+CONFIG_PATH = os.path.expanduser("~/.ccost.json")
+DEFAULT_CFG = {"sources": {"claude": True, "codex": True},
+               "claude_root": None, "codex_root": None,
+               "refresh_ms": 3000, "default_period": 0}
+SOURCES = ("claude", "codex")
+
+
+def load_config():
+    cfg = json.loads(json.dumps(DEFAULT_CFG))
+    try:
+        with open(CONFIG_PATH, encoding="utf-8") as fh:
+            user = json.load(fh)
+        for k, v in user.items():
+            if k == "sources" and isinstance(v, dict):
+                for sk, sv in v.items():
+                    if sk in cfg["sources"]:
+                        cfg["sources"][sk] = bool(sv)
+            elif k in cfg:
+                cfg[k] = v
+    except (OSError, ValueError):
+        pass
+    return cfg
+
+
+def save_config(cfg):
+    try:
+        with open(CONFIG_PATH, "w", encoding="utf-8") as fh:
+            json.dump(cfg, fh, ensure_ascii=False, indent=2)
+    except OSError:
+        pass
+
+
+CFG = load_config()
+
+
+def claude_root():
+    # CCOST_ROOT — например, из Windows смотреть в WSL:
+    # CCOST_ROOT=\\wsl.localhost\Ubuntu\home\user\.claude\projects
+    return (os.environ.get("CCOST_ROOT") or CFG.get("claude_root")
+            or os.path.expanduser("~/.claude/projects"))
+
+
+def codex_root():
+    return (os.environ.get("CCOST_CODEX_ROOT") or CFG.get("codex_root")
+            or os.path.expanduser("~/.codex/sessions"))
+
+
+def source_roots():
+    return {"claude": claude_root(), "codex": codex_root()}
+
 
 def price_for(model):
-    """Цена модели; датированные id (…-20251001) матчатся по префиксу."""
-    p = PRICE.get(model)
-    if p:
-        return p
-    for k, v in PRICE.items():
-        if model.startswith(k):
-            return v
+    """(input, output, cached) $/1M; префикс-матч длиннейшим ключом
+    (иначе gpt-5 перехватит gpt-5.4). None — модели нет в прайсе."""
+    for table, anthropic in ((PRICE, True), (PRICE_OPENAI, False)):
+        p = table.get(model)
+        if p is None:
+            for k in sorted(table, key=len, reverse=True):
+                if model.startswith(k):
+                    p = table[k]
+                    break
+        if p is not None:
+            if anthropic:
+                return p[0], p[1], p[0] * CACHE_READ
+            return p
     return None
 
 
 def cost_of(model, tin, tout, cw, cr, cw1h):
-    """None — модели нет в прайсе (стоимость неизвестна)."""
+    """Единая формула: у codex-записей cw=0, кэшированный input лежит в cr
+    и тарифицируется своей ценой. None — модели нет в прайсе."""
     p = price_for(model)
     if p is None:
         return None
-    pin, pout = p
-    ci = pin / 1e6
+    pin, pout, pcached = p
     cw5 = max(cw - cw1h, 0)
-    return (tin * ci + tout * pout / 1e6
-            + cw5 * ci * CACHE_W_5M + cw1h * ci * CACHE_W_1H
-            + cr * ci * CACHE_READ)
+    return (tin * pin + tout * pout + cr * pcached
+            + cw5 * pin * CACHE_W_5M + cw1h * pin * CACHE_W_1H) / 1e6
 
 
 def parse_ts(s):
@@ -130,7 +201,7 @@ def clean_text(s):
 # ---------------------------------------------------------------- сбор данных
 
 class Rec:
-    __slots__ = ("t", "model", "session", "project",
+    __slots__ = ("t", "model", "session", "project", "src",
                  "tin", "tout", "cw", "cr", "cw1h",
                  "cost", "day", "hour", "wd", "tools")
 
@@ -138,7 +209,8 @@ class Rec:
 class Collector:
     """Инкрементальный парсер JSONL: помнит, до какого байта дочитан каждый
     файл, и на повторном scan() разбирает только дописанное — это и делает
-    возможным live-режим. Дедупликация по message.id (пофилдовый максимум)."""
+    возможным live-режим. Источники: Claude Code (дедуп по message.id,
+    пофилдовый максимум) и Codex/OpenAI (события token_count)."""
 
     def __init__(self):
         self.by_mid = {}
@@ -146,16 +218,25 @@ class Collector:
         self.titles = {}
         self.unknown = set()
         self.pos = {}            # путь -> байт, до которого файл разобран
-        self.seen_tools = set()  # id tool_use-блоков (дедуп вызовов)
+        self.seen_tools = set()  # id tool_use/function_call (дедуп вызовов)
+        self.seen_codex = set()  # дедуп codex token_count-событий
+        self.codex_state = {}    # путь -> {sid, proj, model, tools} (стейт файла)
         self.dirty = set()       # записи, которым нужно пересчитать cost
         self.progress = (0, 0)   # (файлов разобрано, всего) — для GUI-прогресса
 
     def scan(self):
-        """Дочитывает новые/изменённые файлы. True — данные изменились."""
+        """Дочитывает новые/изменённые файлы включённых источников.
+        True — данные изменились."""
         changed = False
-        files = glob.glob(os.path.join(ROOT, "**", "*.jsonl"), recursive=True)
-        for n, fp in enumerate(files):
-            self.progress = (n + 1, len(files))
+        jobs = []
+        roots = source_roots()
+        for src in SOURCES:
+            if not CFG["sources"].get(src, True):
+                continue
+            pat = os.path.join(roots[src], "**", "*.jsonl")
+            jobs += [(src, fp) for fp in glob.glob(pat, recursive=True)]
+        for n, (src, fp) in enumerate(jobs):
+            self.progress = (n + 1, len(jobs))
             try:
                 size = os.path.getsize(fp)
             except OSError:
@@ -177,7 +258,13 @@ class Collector:
                 continue             # недописанная строка — дождёмся следующего тика
             self.pos[fp] = done + end
             for raw in data[:end].split(b"\n"):
-                if raw and self._line(raw.decode("utf-8", "replace")):
+                if not raw:
+                    continue
+                line = raw.decode("utf-8", "replace")
+                if src == "claude":
+                    if self._line(line):
+                        changed = True
+                elif self._line_codex(fp, line):
                     changed = True
         if self.dirty:
             for r in self.dirty:
@@ -221,6 +308,7 @@ class Collector:
         touched = False
         if r is None:
             r = Rec()
+            r.src = "claude"
             r.model = m.get("model", "unknown")
             r.session = o.get("sessionId", "?")
             cwd = o.get("cwd") or ""
@@ -291,6 +379,91 @@ class Collector:
         if text and not text.startswith("<") and not text.startswith("Caveat"):
             self.titles[sid] = text[:80]
 
+    # ------------------------------------------------------------ codex
+    def _line_codex(self, fp, line):
+        """Rollout-файлы Codex CLI (~/.codex/sessions): usage приходит
+        событиями token_count (last_token_usage = один запрос к API),
+        модель и cwd — из turn_context/session_meta."""
+        if '"token_count"' not in line and '"session_meta"' not in line \
+                and '"turn_context"' not in line and '"user_message"' not in line \
+                and '"function_call"' not in line:
+            return False
+        try:
+            o = json.loads(line)
+        except ValueError:
+            return False
+        st = self.codex_state.setdefault(
+            fp, {"sid": os.path.basename(fp)[:-6], "proj": "?",
+                 "model": "unknown", "tools": []})
+        typ = o.get("type")
+        pay = o.get("payload") or {}
+        if typ == "session_meta":
+            st["sid"] = pay.get("id") or st["sid"]
+            cwd = pay.get("cwd") or ""
+            st["proj"] = os.path.basename(cwd) or "?"
+            return False
+        if typ == "turn_context":
+            st["model"] = pay.get("model") or st["model"]
+            cwd = pay.get("cwd") or ""
+            if cwd:
+                st["proj"] = os.path.basename(cwd) or st["proj"]
+            return False
+        if typ == "response_item":
+            if pay.get("type") != "function_call":
+                return False
+            cid = pay.get("call_id") or pay.get("id")
+            if cid:
+                if cid in self.seen_tools:
+                    return False
+                self.seen_tools.add(cid)
+            st["tools"].append(pay.get("name") or "?")
+            return False
+        if typ != "event_msg":
+            return False
+        pt = pay.get("type")
+        if pt == "user_message":
+            if st["sid"] not in self.titles:
+                text = " ".join(clean_text(str(pay.get("message") or "")).split())
+                if text:
+                    self.titles[st["sid"]] = text[:80]
+            return False
+        if pt != "token_count":
+            return False
+        u = (pay.get("info") or {}).get("last_token_usage") or {}
+        tin_all = u.get("input_tokens", 0)
+        cached = u.get("cached_input_tokens", 0)
+        tout = u.get("output_tokens", 0)
+        if tin_all + tout == 0:
+            return False
+        key = (st["sid"], o.get("timestamp"), tin_all, tout,
+               u.get("total_tokens", 0))
+        if key in self.seen_codex:
+            return False               # дубль из resume
+        self.seen_codex.add(key)
+        r = Rec()
+        r.src = "codex"
+        r.model = st["model"]
+        r.session = st["sid"]
+        r.project = st["proj"]
+        r.tin = max(tin_all - cached, 0)   # cached — подмножество input
+        r.cr = cached                      # кэш-чтения, своя цена в прайсе
+        r.cw = r.cw1h = 0
+        r.tout = tout
+        r.tools = tuple(st["tools"])
+        st["tools"] = []
+        r.t = 0.0
+        r.day, r.hour, r.wd = "?", -1, -1
+        t = parse_ts(o.get("timestamp"))
+        if t:
+            r.t = t
+            lt = datetime.fromtimestamp(t)
+            r.day = lt.strftime("%Y-%m-%d")
+            r.hour = lt.hour
+            r.wd = lt.weekday()
+        self.records.append(r)
+        self.dirty.add(r)
+        return True
+
 
 # ---------------------------------------------------------------- агрегация
 
@@ -344,11 +517,11 @@ def cache_saved(records):
         p = price_for(r.model)
         if not p:
             continue
-        ci = p[0] / 1e6
+        pin, _, pcached = p
         cw5 = max(r.cw - r.cw1h, 0)
-        saved += (r.cr * ci * (1 - CACHE_READ)
-                  - cw5 * ci * (CACHE_W_5M - 1)
-                  - r.cw1h * ci * (CACHE_W_1H - 1))
+        saved += (r.cr * (pin - pcached)
+                  - cw5 * pin * (CACHE_W_5M - 1)
+                  - r.cw1h * pin * (CACHE_W_1H - 1)) / 1e6
     return saved
 
 
@@ -629,12 +802,13 @@ def gui_payload(co, period, day=None):
     """Все данные дашборда одним куском; вызывается на каждый poll.
     day=YYYY-MM-DD — детализация дня: график остаётся периодным (контекст),
     всё остальное считается по выбранному дню."""
-    f_all = apply_period(co.records, period)
+    enabled = [r for r in co.records if CFG["sources"].get(r.src, True)]
+    f_all = apply_period(enabled, period)
     f = [r for r in f_all if r.day == day] if day else f_all
     ov = overview(f)
     if not ov:
         return {"total": None, "period": period, "day": day,
-                "root": ROOT, "have_any": bool(co.records),
+                "root": claude_root(), "have_any": bool(enabled),
                 "unknown": sorted(co.unknown)}
     days_agg = aggregate(f_all, lambda r: r.day)
     days_agg.pop("?", None)
@@ -866,7 +1040,7 @@ footer{color:var(--dim); font:11px var(--mono); text-align:center; padding:4px 0
 /* своя рамка окна: шапка = тайтлбар */
 body.chrome-mac header{padding:13px 28px 8px 92px; min-height:52px;
   -webkit-user-select:none; cursor:default}
-body.chrome-mac nav{align-self:center}       /* на линии светофоров */
+body.chrome-mac .hright{align-self:center}   /* на линии светофоров */
 body.chrome-mac .brand{display:none}         /* окно само себя подписывает */
 body.chrome-mac header{justify-content:flex-end}
 #conn{font:11px var(--mono); color:#e0b072; border:1px solid #4a3620;
@@ -875,7 +1049,7 @@ body.offline #cursor{background:var(--dim); box-shadow:none; animation:none}
 body.chrome-mac .hero{padding-top:16px}
 body.chrome-win header{padding:12px 20px 6px; min-height:46px;
   -webkit-user-select:none}
-body.chrome-win nav{margin-right:142px}      /* не наезжать на — ▢ ✕ */
+body.chrome-win .hright{margin-left:auto; margin-right:142px}
 body.chrome-win header > :not(#dragstrip){position:relative; z-index:1}
 body.chrome-win nav{margin-left:auto}
 #dragstrip{position:absolute; inset:0; z-index:0}
@@ -897,13 +1071,55 @@ body.nodata .cards, body.nodata .cols, body.nodata main > .panel{display:none}
 @media (prefers-reduced-motion:reduce){
   *{animation:none!important; transition:none!important}
 }
+
+/* правый блок шапки: периоды + шестерёнка */
+.hright{display:flex; align-items:center; gap:12px}
+#gear{appearance:none; border:0; background:transparent; color:var(--dim);
+  width:28px; height:28px; display:flex; align-items:center; justify-content:center;
+  border-radius:6px; cursor:pointer; transition:color .2s, transform .35s}
+#gear:hover{color:var(--ink); transform:rotate(45deg)}
+/* панель настроек */
+#shade{position:fixed; inset:0; background:rgba(4,6,8,.55); z-index:19}
+#drawer{position:fixed; top:0; right:0; bottom:0; width:340px; z-index:20;
+  background:var(--panel); border-left:1px solid var(--line);
+  padding:20px 20px 28px; overflow-y:auto; transform:translateX(102%);
+  transition:transform .32s cubic-bezier(.3,.9,.3,1)}
+body.cfgopen #drawer{transform:none}
+body.chrome-win #drawer{top:30px}
+#drawer h3{font:600 11px var(--sans); text-transform:uppercase;
+  letter-spacing:.14em; color:var(--amber); margin-bottom:14px}
+.cfg-h{font:600 10.5px var(--sans); text-transform:uppercase;
+  letter-spacing:.12em; color:var(--dim); margin:20px 0 10px}
+.srcrow{display:flex; gap:10px; align-items:flex-start; padding:7px 0; cursor:pointer}
+.srcrow input{display:none}
+.tgl{flex:none; width:30px; height:17px; border-radius:9px; background:#1a222c;
+  position:relative; margin-top:2px; transition:background .2s}
+.tgl::after{content:""; position:absolute; top:2px; left:2px; width:13px; height:13px;
+  border-radius:50%; background:var(--dim); transition:left .2s, background .2s}
+.srcrow input:checked + .tgl{background:#14433f}
+.srcrow input:checked + .tgl::after{left:15px; background:var(--teal)}
+.srcinfo div:first-child{font:600 13px var(--sans)}
+.dim2{color:var(--dim); font:11px var(--mono); margin-top:2px; word-break:break-all}
+.chips{display:flex; gap:6px; flex-wrap:wrap}
+.chipbtn{appearance:none; border:1px solid var(--line); background:transparent;
+  color:var(--dim); font:12px var(--mono); border-radius:6px; padding:4px 10px;
+  cursor:pointer; transition:color .15s, border-color .15s}
+.chipbtn:hover{color:var(--ink)}
+.chipbtn.on{color:var(--teal); border-color:#1f4a46; background:#12211f}
+.pricetbl{display:grid; grid-template-columns:1fr auto auto; gap:4px 14px;
+  font:11.5px var(--mono); color:var(--dim)}
+.pricetbl .ph{color:var(--amber); font:600 10px var(--sans);
+  text-transform:uppercase; letter-spacing:.1em}
 </style>
 </head>
 <body>
 <header>
   <div class="brand">ccost <span id="livedot"></span><span id="livelbl">live</span></div>
   <span id="conn" hidden>нет связи</span>
-  <nav id="periods" aria-label="период"></nav>
+  <div class="hright">
+    <nav id="periods" aria-label="период"></nav>
+    <button id="gear" aria-label="настройки" title="настройки"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.09a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.09a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.09a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg></button>
+  </div>
 </header>
 <main>
   <section class="hero" id="hero">
@@ -944,6 +1160,11 @@ body.nodata .cards, body.nodata .cols, body.nodata main > .panel{display:none}
   <footer>ccost · live-дашборд · периоды: ←/→ или свайп · клик по бару дня — детали дня (Esc — сброс)</footer>
 </main>
 <div id="tip"></div>
+<div id="shade" hidden></div>
+<aside id="drawer" aria-label="настройки">
+  <h3>настройки</h3>
+  <div id="cfgbody">загрузка…</div>
+</aside>
 <script>
 "use strict";
 const $ = id => document.getElementById(id);
@@ -1028,6 +1249,9 @@ function setDaySel(day, refetch = true){
 }
 addEventListener("resize", moveThumb);
 addEventListener("keydown", e => {
+  if (e.key === "Escape" && document.body.classList.contains("cfgopen")){
+    closeDrawer(); return;
+  }
   if (e.key === "Escape" && selDay){ setDaySel(null); return; }
   if (selDay){                                // в режиме дня ←/→ листают дни
     const i = LD.findIndex(x => x.d === selDay);
@@ -1433,10 +1657,127 @@ async function tick(force){
     moveThumb();
   });
 })();
+/* --------------------------------------------- настройки (конфиг-панель) */
+let cfgCache = null;
+let timer = null;
+function setRefresh(ms){
+  if (timer) clearInterval(timer);
+  timer = setInterval(() => tick(false), ms);
+}
+async function fetchCfg(){
+  cfgCache = await (await fetch("/config")).json();
+  return cfgCache;
+}
+function chipRow(opts, cur, fn){
+  const box = document.createElement("div");
+  box.className = "chips";
+  for (const [label, val] of opts){
+    const b = document.createElement("button");
+    b.textContent = label;
+    b.className = "chipbtn" + (val === cur ? " on" : "");
+    b.onclick = () => fn(val);
+    box.appendChild(b);
+  }
+  return box;
+}
+function renderCfg(){
+  const c = cfgCache.config, meta = cfgCache.meta;
+  const body = $("cfgbody");
+  body.replaceChildren();
+  const head = t => {
+    const e = document.createElement("div");
+    e.className = "cfg-h"; e.textContent = t;
+    body.appendChild(e);
+  };
+  head("источники");
+  for (const [key, name] of [["claude","Claude Code"],["codex","Codex · OpenAI"]]){
+    const m = meta[key];
+    const row = document.createElement("label");
+    row.className = "srcrow";
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.checked = !!c.sources[key];
+    cb.onchange = () => postCfg({sources: {[key]: cb.checked}});
+    const tgl = document.createElement("span");
+    tgl.className = "tgl";
+    const info = document.createElement("div");
+    info.className = "srcinfo";
+    const n1 = document.createElement("div");
+    n1.textContent = name;
+    const n2 = document.createElement("div");
+    n2.className = "dim2";
+    n2.textContent = m.files
+      ? m.files + " файлов · " + m.records.toLocaleString("ru-RU") + " записей"
+      : "не найдено";
+    const n3 = document.createElement("div");
+    n3.className = "dim2";
+    n3.textContent = m.root;
+    info.append(n1, n2, n3);
+    row.append(cb, tgl, info);
+    body.appendChild(row);
+  }
+  head("обновление");
+  body.appendChild(chipRow([["2 с",2000],["5 с",5000],["10 с",10000]],
+                           c.refresh_ms, v => postCfg({refresh_ms: v})));
+  head("период при старте");
+  body.appendChild(chipRow(PERIODS.map(p => [p[0], p[1]]),
+                           c.default_period, v => postCfg({default_period: v})));
+  head("прайс · $ за 1M токенов");
+  const tbl = document.createElement("div");
+  tbl.className = "pricetbl";
+  const row3 = (a, b, cc, ph) => {
+    for (const t of [a, b, cc]){
+      const e = document.createElement("div");
+      if (ph) e.className = "ph";
+      e.textContent = t;
+      tbl.appendChild(e);
+    }
+  };
+  row3("модель", "in", "out", true);
+  for (const [name, p] of Object.entries(cfgCache.prices.anthropic))
+    row3(name.replace("claude-",""), "$" + p[0], "$" + p[1]);
+  for (const [name, p] of Object.entries(cfgCache.prices.openai))
+    row3(name, "$" + p[0], "$" + p[1]);
+  body.appendChild(tbl);
+}
+async function postCfg(partial){
+  cfgCache = await (await fetch("/config",
+    {method: "POST", body: JSON.stringify(partial)})).json();
+  renderCfg();
+  setRefresh(cfgCache.config.refresh_ms);
+  mainEl.classList.add("dim");
+  tick(true);
+}
+function closeDrawer(){
+  $("shade").hidden = true;
+  document.body.classList.remove("cfgopen");
+}
+$("gear").onclick = () => {
+  $("shade").hidden = false;
+  document.body.classList.add("cfgopen");
+  fetchCfg().then(renderCfg)
+    .catch(() => { $("cfgbody").textContent = "не удалось получить конфиг"; });
+};
+$("shade").onclick = closeDrawer;
+
 moveThumb();
 addEventListener("load", moveThumb);
-tick(true);
-setInterval(() => tick(false), 3000);
+(async () => {
+  try{
+    const c = await fetchCfg();
+    const i = PERIODS.findIndex(p => p[1] === c.config.default_period);
+    if (i > 0){
+      pi = i; period = PERIODS[i][1];
+      nav.querySelectorAll("button").forEach((x, j) =>
+        x.className = j === pi ? "on" : "");
+      moveThumb();
+    }
+    setRefresh(c.config.refresh_ms);
+  }catch(e){
+    setRefresh(3000);
+  }
+  tick(true);
+})();
 </script>
 </body>
 </html>
@@ -1507,9 +1848,28 @@ def _gui_server(co, port=0):
                                         ensure_ascii=False).encode("utf-8")
             return cache[key]
 
+    def config_info():
+        roots = source_roots()
+        meta = {}
+        for s in SOURCES:
+            files = glob.glob(os.path.join(roots[s], "**", "*.jsonl"),
+                              recursive=True)
+            meta[s] = {"root": roots[s], "files": len(files),
+                       "records": sum(1 for r in co.records if r.src == s)}
+        return {"config": CFG, "meta": meta,
+                "prices": {"anthropic": PRICE, "openai": PRICE_OPENAI}}
+
     class H(BaseHTTPRequestHandler):
         def log_message(self, *a):
             pass
+
+        def _send(self, body, ctype):
+            self.send_response(200)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
 
         def do_GET(self):
             u = urlparse(self.path)
@@ -1526,16 +1886,40 @@ def _gui_server(co, port=0):
                     day = None
                 body = payload(period % len(PERIODS), day)
                 ctype = "application/json; charset=utf-8"
+            elif u.path == "/config":
+                body = json.dumps(config_info(), ensure_ascii=False).encode("utf-8")
+                ctype = "application/json; charset=utf-8"
             else:
                 self.send_response(404)
                 self.end_headers()
                 return
-            self.send_response(200)
-            self.send_header("Content-Type", ctype)
-            self.send_header("Content-Length", str(len(body)))
-            self.send_header("Cache-Control", "no-store")
-            self.end_headers()
-            self.wfile.write(body)
+            self._send(body, ctype)
+
+        def do_POST(self):
+            if urlparse(self.path).path != "/config":
+                self.send_response(404)
+                self.end_headers()
+                return
+            try:
+                n = int(self.headers.get("Content-Length", 0))
+                upd = json.loads(self.rfile.read(n).decode("utf-8"))
+            except (ValueError, TypeError):
+                self.send_response(400)
+                self.end_headers()
+                return
+            if isinstance(upd.get("sources"), dict):
+                for sk, sv in upd["sources"].items():
+                    if sk in CFG["sources"]:
+                        CFG["sources"][sk] = bool(sv)
+            if isinstance(upd.get("refresh_ms"), int):
+                CFG["refresh_ms"] = max(1000, min(60000, upd["refresh_ms"]))
+            if isinstance(upd.get("default_period"), int):
+                CFG["default_period"] = upd["default_period"] % len(PERIODS)
+            save_config(CFG)
+            with lock:
+                cache.clear()
+            body = json.dumps(config_info(), ensure_ascii=False).encode("utf-8")
+            self._send(body, "application/json; charset=utf-8")
 
     srv = HTTPServer(("127.0.0.1", port), H)
     url = f"http://127.0.0.1:{srv.server_address[1]}/"

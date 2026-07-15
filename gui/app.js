@@ -81,6 +81,9 @@ function setDaySel(day, refetch = true){
 }
 addEventListener("resize", moveThumb);
 addEventListener("keydown", e => {
+  if (e.key === "Escape" && document.body.classList.contains("cfgopen")){
+    closeDrawer(); return;
+  }
   if (e.key === "Escape" && selDay){ setDaySel(null); return; }
   if (selDay){                                // в режиме дня ←/→ листают дни
     const i = LD.findIndex(x => x.d === selDay);
@@ -486,7 +489,124 @@ async function tick(force){
     moveThumb();
   });
 })();
+/* --------------------------------------------- настройки (конфиг-панель) */
+let cfgCache = null;
+let timer = null;
+function setRefresh(ms){
+  if (timer) clearInterval(timer);
+  timer = setInterval(() => tick(false), ms);
+}
+async function fetchCfg(){
+  cfgCache = await (await fetch("/config")).json();
+  return cfgCache;
+}
+function chipRow(opts, cur, fn){
+  const box = document.createElement("div");
+  box.className = "chips";
+  for (const [label, val] of opts){
+    const b = document.createElement("button");
+    b.textContent = label;
+    b.className = "chipbtn" + (val === cur ? " on" : "");
+    b.onclick = () => fn(val);
+    box.appendChild(b);
+  }
+  return box;
+}
+function renderCfg(){
+  const c = cfgCache.config, meta = cfgCache.meta;
+  const body = $("cfgbody");
+  body.replaceChildren();
+  const head = t => {
+    const e = document.createElement("div");
+    e.className = "cfg-h"; e.textContent = t;
+    body.appendChild(e);
+  };
+  head("источники");
+  for (const [key, name] of [["claude","Claude Code"],["codex","Codex · OpenAI"]]){
+    const m = meta[key];
+    const row = document.createElement("label");
+    row.className = "srcrow";
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.checked = !!c.sources[key];
+    cb.onchange = () => postCfg({sources: {[key]: cb.checked}});
+    const tgl = document.createElement("span");
+    tgl.className = "tgl";
+    const info = document.createElement("div");
+    info.className = "srcinfo";
+    const n1 = document.createElement("div");
+    n1.textContent = name;
+    const n2 = document.createElement("div");
+    n2.className = "dim2";
+    n2.textContent = m.files
+      ? m.files + " файлов · " + m.records.toLocaleString("ru-RU") + " записей"
+      : "не найдено";
+    const n3 = document.createElement("div");
+    n3.className = "dim2";
+    n3.textContent = m.root;
+    info.append(n1, n2, n3);
+    row.append(cb, tgl, info);
+    body.appendChild(row);
+  }
+  head("обновление");
+  body.appendChild(chipRow([["2 с",2000],["5 с",5000],["10 с",10000]],
+                           c.refresh_ms, v => postCfg({refresh_ms: v})));
+  head("период при старте");
+  body.appendChild(chipRow(PERIODS.map(p => [p[0], p[1]]),
+                           c.default_period, v => postCfg({default_period: v})));
+  head("прайс · $ за 1M токенов");
+  const tbl = document.createElement("div");
+  tbl.className = "pricetbl";
+  const row3 = (a, b, cc, ph) => {
+    for (const t of [a, b, cc]){
+      const e = document.createElement("div");
+      if (ph) e.className = "ph";
+      e.textContent = t;
+      tbl.appendChild(e);
+    }
+  };
+  row3("модель", "in", "out", true);
+  for (const [name, p] of Object.entries(cfgCache.prices.anthropic))
+    row3(name.replace("claude-",""), "$" + p[0], "$" + p[1]);
+  for (const [name, p] of Object.entries(cfgCache.prices.openai))
+    row3(name, "$" + p[0], "$" + p[1]);
+  body.appendChild(tbl);
+}
+async function postCfg(partial){
+  cfgCache = await (await fetch("/config",
+    {method: "POST", body: JSON.stringify(partial)})).json();
+  renderCfg();
+  setRefresh(cfgCache.config.refresh_ms);
+  mainEl.classList.add("dim");
+  tick(true);
+}
+function closeDrawer(){
+  $("shade").hidden = true;
+  document.body.classList.remove("cfgopen");
+}
+$("gear").onclick = () => {
+  $("shade").hidden = false;
+  document.body.classList.add("cfgopen");
+  fetchCfg().then(renderCfg)
+    .catch(() => { $("cfgbody").textContent = "не удалось получить конфиг"; });
+};
+$("shade").onclick = closeDrawer;
+
 moveThumb();
 addEventListener("load", moveThumb);
-tick(true);
-setInterval(() => tick(false), 3000);
+(async () => {
+  try{
+    const c = await fetchCfg();
+    const i = PERIODS.findIndex(p => p[1] === c.config.default_period);
+    if (i > 0){
+      pi = i; period = PERIODS[i][1];
+      nav.querySelectorAll("button").forEach((x, j) =>
+        x.className = j === pi ? "on" : "");
+      moveThumb();
+    }
+    setRefresh(c.config.refresh_ms);
+  }catch(e){
+    setRefresh(3000);
+  }
+  tick(true);
+})();

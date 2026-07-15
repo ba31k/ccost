@@ -167,7 +167,7 @@ footer{color:var(--dim); font:11px var(--mono); text-align:center; padding:4px 0
 /* своя рамка окна: шапка = тайтлбар */
 body.chrome-mac header{padding:13px 28px 8px 92px; min-height:52px;
   -webkit-user-select:none; cursor:default}
-body.chrome-mac nav{align-self:center}       /* на линии светофоров */
+body.chrome-mac .hright{align-self:center}   /* на линии светофоров */
 body.chrome-mac .brand{display:none}         /* окно само себя подписывает */
 body.chrome-mac header{justify-content:flex-end}
 #conn{font:11px var(--mono); color:#e0b072; border:1px solid #4a3620;
@@ -176,7 +176,7 @@ body.offline #cursor{background:var(--dim); box-shadow:none; animation:none}
 body.chrome-mac .hero{padding-top:16px}
 body.chrome-win header{padding:12px 20px 6px; min-height:46px;
   -webkit-user-select:none}
-body.chrome-win nav{margin-right:142px}      /* не наезжать на — ▢ ✕ */
+body.chrome-win .hright{margin-left:auto; margin-right:142px}
 body.chrome-win header > :not(#dragstrip){position:relative; z-index:1}
 body.chrome-win nav{margin-left:auto}
 #dragstrip{position:absolute; inset:0; z-index:0}
@@ -198,3 +198,42 @@ body.nodata .cards, body.nodata .cols, body.nodata main > .panel{display:none}
 @media (prefers-reduced-motion:reduce){
   *{animation:none!important; transition:none!important}
 }
+
+/* правый блок шапки: периоды + шестерёнка */
+.hright{display:flex; align-items:center; gap:12px}
+#gear{appearance:none; border:0; background:transparent; color:var(--dim);
+  width:28px; height:28px; display:flex; align-items:center; justify-content:center;
+  border-radius:6px; cursor:pointer; transition:color .2s, transform .35s}
+#gear:hover{color:var(--ink); transform:rotate(45deg)}
+/* панель настроек */
+#shade{position:fixed; inset:0; background:rgba(4,6,8,.55); z-index:19}
+#drawer{position:fixed; top:0; right:0; bottom:0; width:340px; z-index:20;
+  background:var(--panel); border-left:1px solid var(--line);
+  padding:20px 20px 28px; overflow-y:auto; transform:translateX(102%);
+  transition:transform .32s cubic-bezier(.3,.9,.3,1)}
+body.cfgopen #drawer{transform:none}
+body.chrome-win #drawer{top:30px}
+#drawer h3{font:600 11px var(--sans); text-transform:uppercase;
+  letter-spacing:.14em; color:var(--amber); margin-bottom:14px}
+.cfg-h{font:600 10.5px var(--sans); text-transform:uppercase;
+  letter-spacing:.12em; color:var(--dim); margin:20px 0 10px}
+.srcrow{display:flex; gap:10px; align-items:flex-start; padding:7px 0; cursor:pointer}
+.srcrow input{display:none}
+.tgl{flex:none; width:30px; height:17px; border-radius:9px; background:#1a222c;
+  position:relative; margin-top:2px; transition:background .2s}
+.tgl::after{content:""; position:absolute; top:2px; left:2px; width:13px; height:13px;
+  border-radius:50%; background:var(--dim); transition:left .2s, background .2s}
+.srcrow input:checked + .tgl{background:#14433f}
+.srcrow input:checked + .tgl::after{left:15px; background:var(--teal)}
+.srcinfo div:first-child{font:600 13px var(--sans)}
+.dim2{color:var(--dim); font:11px var(--mono); margin-top:2px; word-break:break-all}
+.chips{display:flex; gap:6px; flex-wrap:wrap}
+.chipbtn{appearance:none; border:1px solid var(--line); background:transparent;
+  color:var(--dim); font:12px var(--mono); border-radius:6px; padding:4px 10px;
+  cursor:pointer; transition:color .15s, border-color .15s}
+.chipbtn:hover{color:var(--ink)}
+.chipbtn.on{color:var(--teal); border-color:#1f4a46; background:#12211f}
+.pricetbl{display:grid; grid-template-columns:1fr auto auto; gap:4px 14px;
+  font:11.5px var(--mono); color:var(--dim)}
+.pricetbl .ph{color:var(--amber); font:600 10px var(--sans);
+  text-transform:uppercase; letter-spacing:.1em}
