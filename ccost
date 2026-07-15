@@ -12,7 +12,6 @@
   ccost json      — агрегаты в JSON (для скриптов)
 """
 import calendar
-import curses
 import glob
 import json
 import locale
@@ -24,6 +23,11 @@ import time
 import unicodedata
 from collections import Counter, defaultdict
 from datetime import datetime, date, timedelta, timezone
+
+try:
+    import curses
+except ImportError:            # Windows без windows-curses: report/json работают
+    curses = None
 
 # ---------------------------------------------------------------- прайс / цены
 
@@ -677,7 +681,7 @@ class App:
         scr.timeout(2000)              # тик live-режима
         try:
             curses.mousemask(curses.ALL_MOUSE_EVENTS)
-        except curses.error:
+        except (curses.error, AttributeError):   # PDCurses может не уметь
             pass
         self._init_colors()
         while True:
@@ -729,7 +733,7 @@ class App:
         try:
             curses.use_default_colors()   # фон = родной фон терминала
             bg = -1
-        except curses.error:
+        except (curses.error, AttributeError):
             bg = curses.COLOR_BLACK
         ncolors = getattr(curses, "COLORS", 8)
         if ncolors >= 256:
@@ -855,8 +859,8 @@ class App:
         s = s[: maxx - x - 1]
         try:
             scr.addstr(y, x, s, attr)
-        except curses.error:
-            pass
+        except (curses.error, UnicodeEncodeError):
+            pass                           # край экрана / не-юникодная консоль
 
     def draw(self, scr):
         scr.erase()
@@ -1191,6 +1195,8 @@ def setup_output():
         if "UTF" in _codeset().replace("-", ""):
             utf8 = True
             break
+    if os.environ.get("CCOST_UTF8"):
+        utf8 = True           # ручной override: на Windows Terminal юникод ок
     try:                      # текстовый режим: не падать на не-UTF8 stdout
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     except Exception:
@@ -1224,6 +1230,11 @@ def main():
         return
     want_text = arg in ("report", "-r", "--report", "text")
     if want_text or not sys.stdout.isatty():
+        print_text(co)
+        return
+    if curses is None:
+        sys.stderr.write("для TUI нужен модуль curses "
+                         "(Windows: pip install windows-curses); текстовый отчёт:\n")
         print_text(co)
         return
     _dodge_broken_rep()
