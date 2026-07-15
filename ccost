@@ -863,8 +863,9 @@ body.day-mode .cards{display:none}
 #tip b{color:var(--money)}
 footer{color:var(--dim); font:11px var(--mono); text-align:center; padding:4px 0 26px}
 /* своя рамка окна: шапка = тайтлбар */
-body.chrome-mac header{padding-left:86px; padding-top:20px;
+body.chrome-mac header{padding:13px 24px 0 92px; min-height:52px;
   -webkit-user-select:none; cursor:default}
+body.chrome-mac .hero{padding-top:18px}
 body.chrome-win header{padding-top:12px; -webkit-user-select:none}
 body.chrome-win header > :not(#dragstrip){position:relative; z-index:1}
 body.chrome-win nav{margin-left:auto}

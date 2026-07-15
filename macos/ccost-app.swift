@@ -23,6 +23,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
         window.title = "ccost"
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
+        // пустой unified-тулбар делает тайтлбар выше — светофоры опускаются
+        // на линию шапки дашборда
+        window.toolbarStyle = .unified
+        let tb = NSToolbar(identifier: "ccost-tb")
+        tb.showsBaselineSeparator = false
+        window.toolbar = tb
         window.appearance = NSAppearance(named: .darkAqua)
         window.backgroundColor = BG
         window.minSize = NSSize(width: 720, height: 480)
