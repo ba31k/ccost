@@ -1,0 +1,83 @@
+# Сборка standalone-бинарников (Python внутри) на тег v* — релиз с ассетами.
+# Кросс-компиляции у PyInstaller нет, поэтому матрица по ОС.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest        # universal2: один бинарь на arm64 и intel
+            asset: ccost-macos-universal2
+            arch_flags: --target-arch universal2
+          - os: ubuntu-latest
+            asset: ccost-linux-x86_64
+            arch_flags: ""
+          - os: windows-latest
+            asset: ccost-windows-x64.exe
+            arch_flags: ""
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Зависимости
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip pyinstaller
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            pip install windows-curses   # curses для TUI внутри exe
+          fi
+      - name: Сборка
+        shell: bash
+        run: |
+          cp ccost ccost.py
+          pyinstaller --onefile --name ccost ${{ matrix.arch_flags }} ccost.py
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            mv dist/ccost.exe "dist/${{ matrix.asset }}"
+          else
+            mv dist/ccost "dist/${{ matrix.asset }}"
+          fi
+      - name: Смоук-тест
+        shell: bash
+        run: ./dist/${{ matrix.asset }} json > /dev/null
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: dist/${{ matrix.asset }}
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          body: |
+            Standalone-бинарники — Python не нужен.
+
+            | файл | система |
+            |---|---|
+            | `ccost-macos-universal2` | macOS (Apple Silicon + Intel) |
+            | `ccost-linux-x86_64` | Linux x86_64 |
+            | `ccost-windows-x64.exe` | Windows x64 |
+
+            **macOS**: `chmod +x ccost-macos-universal2`, при блокировке Гейткипером —
+            `xattr -d com.apple.quarantine ccost-macos-universal2` (бинарь не подписан).
+            **Linux**: `chmod +x ccost-linux-x86_64`.
+            **Windows**: SmartScreen может предупредить — «Выполнить в любом случае».
