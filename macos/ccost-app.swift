@@ -11,6 +11,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
     var window: NSWindow!
     var webView: WKWebView!
     var proc: Process?
+    var statusItem: NSStatusItem?
+    var serverURL: String?
+    var menubarOn = true
+    var statusTimer: Timer?
 
     func applicationDidFinishLaunching(_ note: Notification) {
         let rect = NSRect(x: 0, y: 0, width: 1240, height: 860)
@@ -103,7 +107,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
                 let url = String(buf[r])
                 pipe.fileHandleForReading.readabilityHandler = nil
                 DispatchQueue.main.async {
+                    self?.serverURL = url
                     self?.webView.load(URLRequest(url: URL(string: url)!))
+                    self?.startStatusUpdates()
                 }
             }
         }
@@ -120,7 +126,86 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
 
     @objc func reload(_ sender: Any?) { webView.reload() }
 
-    func applicationShouldTerminateAfterLastWindowClosed(_ app: NSApplication) -> Bool { true }
+    // ---------------------------------------------------------- menu bar
+    // Живой «$сегодня» в статус-баре; включается тумблером в настройках
+    // дашборда (config.menubar), опрашивается вместе со стоимостью.
+    func startStatusUpdates() {
+        refreshStatus()
+        statusTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) {
+            [weak self] _ in self?.refreshStatus()
+        }
+    }
+
+    func fetchJSON(_ path: String, done: @escaping ([String: Any]) -> Void) {
+        guard let base = serverURL, let u = URL(string: base + path) else { return }
+        URLSession.shared.dataTask(with: u) { data, _, _ in
+            guard let d = data,
+                  let obj = try? JSONSerialization.jsonObject(with: d) as? [String: Any]
+            else { return }
+            DispatchQueue.main.async { done(obj) }
+        }.resume()
+    }
+
+    func refreshStatus() {
+        fetchJSON("config") { [weak self] cfg in
+            guard let self = self else { return }
+            let conf = cfg["config"] as? [String: Any]
+            self.menubarOn = (conf?["menubar"] as? Bool) ?? true
+            if !self.menubarOn {
+                if let item = self.statusItem {
+                    NSStatusBar.system.removeStatusItem(item)
+                    self.statusItem = nil
+                }
+                return
+            }
+            self.ensureStatusItem()
+            self.fetchJSON("data?period=1") { d in
+                guard let total = d["total"] as? [String: Any],
+                      let cost = total["cost"] as? Double else {
+                    self.statusItem?.button?.title = "$0"
+                    return
+                }
+                self.statusItem?.button?.title =
+                    cost >= 100 ? String(format: "$%.0f", cost)
+                                : String(format: "$%.2f", cost)
+            }
+        }
+    }
+
+    func ensureStatusItem() {
+        if statusItem != nil { return }
+        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        item.button?.font = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .semibold)
+        item.button?.title = "…"
+        let menu = NSMenu()
+        let open = NSMenuItem(title: "Открыть ccost",
+                              action: #selector(openWindow(_:)), keyEquivalent: "")
+        open.target = self
+        menu.addItem(open)
+        menu.addItem(NSMenuItem.separator())
+        menu.addItem(NSMenuItem(title: "Выйти",
+                                action: #selector(NSApplication.terminate(_:)),
+                                keyEquivalent: "q"))
+        item.menu = menu
+        statusItem = item
+    }
+
+    @objc func openWindow(_ sender: Any?) {
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    func applicationShouldHandleReopen(_ app: NSApplication,
+                                       hasVisibleWindows flag: Bool) -> Bool {
+        if !flag { window.makeKeyAndOrderFront(nil) }
+        return true
+    }
+
+    // при включённом menu bar закрытие окна не убивает приложение —
+    // счётчик продолжает жить в статус-баре
+    func applicationShouldTerminateAfterLastWindowClosed(_ app: NSApplication) -> Bool {
+        return statusItem == nil
+    }
 
     func applicationWillTerminate(_ note: Notification) {
         proc?.terminationHandler = nil

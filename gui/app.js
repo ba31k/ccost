@@ -124,7 +124,7 @@ for (const [lbl, key] of CARD_DEFS){
 /* ------------------------------------------------ рендер */
 const WD = ["пн","вт","ср","чт","пт","сб","вс"];
 let lastSig = null;
-const R = {days: [], grid: [], heat: [], models: [], chats: [], tools: [], hours: []};
+const R = {days: [], grid: [], heat: [], models: [], chats: [], tools: [], hours: [], year: []};
 
 function sigOf(d){
   if (!d.total) return "empty" + d.period;
@@ -214,12 +214,89 @@ function render(d, fresh){
   lerpMoney(cardRef.cAvg.val, t.avg_day, fresh);
   cardRef.cAvg.sub.textContent = "пик " + t.busiest_day + " · " + money(t.busiest_cost);
 
+  const up = $("upd");
+  if (d.update){
+    up.hidden = false;
+    up.textContent = "вышла " + d.update.tag;
+    up.href = d.update.url;
+  } else up.hidden = true;
+
   renderDays(d, fresh);
   renderHeat(d, fresh);
   renderModels(d, fresh);
   renderChats(d, fresh);
   renderTools(d, fresh);
   renderHours(d, fresh);
+  renderYear(d, fresh);
+  renderRecs(d, fresh);
+}
+
+const MONTHS = ["янв","фев","мар","апр","май","июн","июл","авг","сен","окт","ноя","дек"];
+function gotoDay(day){
+  if (period !== 0){
+    pi = 0; period = 0;
+    nav.querySelectorAll("button").forEach((x, j) => x.className = j === 0 ? "on" : "");
+    moveThumb();
+  }
+  setDaySel(day);
+}
+function renderYear(d, fresh){
+  const y = d.year || [];
+  if (!y.length) return;
+  const mx = Math.max(...y.map(x => x.c), 0.01);
+  const first = new Date(y[0].d + "T00:00:00");
+  const pad = (first.getDay() + 6) % 7;         // пн = 0
+  if (fresh || R.year.length !== y.length){
+    const box = $("year");
+    box.replaceChildren();
+    R.year = [];
+    for (let i = 0; i < pad; i++)
+      box.appendChild(document.createElement("i"));
+    for (const x of y){
+      const c = document.createElement("i");
+      c.addEventListener("click", () => { if (c._day && c.classList.contains("has")) gotoDay(c._day); });
+      bindTip(c);
+      box.appendChild(c);
+      R.year.push(c);
+    }
+    const mrow = $("yearmonths");
+    mrow.replaceChildren();
+    let prev = -1;
+    y.forEach((x, i) => {
+      const dt = new Date(x.d + "T00:00:00");
+      if (dt.getDate() <= 7 && dt.getMonth() !== prev){
+        prev = dt.getMonth();
+        const s = document.createElement("span");
+        s.textContent = MONTHS[prev];
+        s.style.left = (Math.floor((i + pad) / 7) * 14) + "px";
+        mrow.appendChild(s);
+      }
+    });
+    mrow.style.width = (Math.ceil((y.length + pad) / 7) * 14) + "px";
+  }
+  y.forEach((x, i) => {
+    const c = R.year[i];
+    if (!c) return;
+    const a = x.c <= 0 ? 0 : 0.16 + 0.84 * Math.pow(x.c / mx, 0.55);
+    c.style.background = x.c > 0 ? "rgba(45,212,200," + a.toFixed(3) + ")" : "";
+    c.classList.toggle("has", x.c > 0);
+    c._day = x.d;
+    c._tip = esc(x.d) + " · <b>" + money(x.c) + "</b>";
+  });
+}
+function renderRecs(d, fresh){
+  const box = $("recs");
+  box.replaceChildren();
+  for (const [i, rec] of (d.records || []).entries()){
+    const el = document.createElement("div");
+    el.className = "rec";
+    el.innerHTML = '<div class="rl"></div><div class="rv"></div><div class="rs"></div>';
+    el.children[0].textContent = rec.label;
+    el.children[1].textContent = rec.value;
+    el.children[2].textContent = rec.sub;
+    if (fresh) stag(el, i, 30);
+    box.appendChild(el);
+  }
 }
 
 function renderDays(d, fresh){
@@ -554,23 +631,80 @@ function renderCfg(){
   head("период при старте");
   body.appendChild(chipRow(PERIODS.map(p => [p[0], p[1]]),
                            c.default_period, v => postCfg({default_period: v})));
+  head("приложение");
+  for (const [key, label] of [["menubar","счётчик в menu bar (мак)"],
+                              ["check_updates","проверять обновления"]]){
+    const row = document.createElement("label");
+    row.className = "srcrow";
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.checked = !!c[key];
+    cb.onchange = () => postCfg({[key]: cb.checked});
+    const tgl = document.createElement("span");
+    tgl.className = "tgl";
+    const info = document.createElement("div");
+    info.className = "srcinfo";
+    const n1 = document.createElement("div");
+    n1.textContent = label;
+    info.append(n1);
+    row.append(cb, tgl, info);
+    body.appendChild(row);
+  }
   head("прайс · $ за 1M токенов");
+  const defaults = {};
+  for (const [n, p] of Object.entries(cfgCache.prices.anthropic))
+    defaults[n] = [p[0], p[1]];
+  for (const [n, p] of Object.entries(cfgCache.prices.openai))
+    defaults[n] = [p[0], p[1]];
+  const ov = c.prices || {};
+  const inputs = {};
   const tbl = document.createElement("div");
   tbl.className = "pricetbl";
-  const row3 = (a, b, cc, ph) => {
-    for (const t of [a, b, cc]){
-      const e = document.createElement("div");
-      if (ph) e.className = "ph";
-      e.textContent = t;
-      tbl.appendChild(e);
+  for (const t of ["модель", "in", "out"]){
+    const e = document.createElement("div");
+    e.className = "ph"; e.textContent = t;
+    tbl.appendChild(e);
+  }
+  const commit = () => {
+    const out = {};
+    for (const [name, def] of Object.entries(defaults)){
+      const vin = parseFloat(inputs[name][0].value);
+      const vout = parseFloat(inputs[name][1].value);
+      if (isFinite(vin) && isFinite(vout) && (vin !== def[0] || vout !== def[1]))
+        out[name] = [vin, vout];
     }
+    postCfg({prices: out});
   };
-  row3("модель", "in", "out", true);
-  for (const [name, p] of Object.entries(cfgCache.prices.anthropic))
-    row3(name.replace("claude-",""), "$" + p[0], "$" + p[1]);
-  for (const [name, p] of Object.entries(cfgCache.prices.openai))
-    row3(name, "$" + p[0], "$" + p[1]);
+  for (const [name, def] of Object.entries(defaults)){
+    const eff = ov[name] || def;
+    const nm = document.createElement("div");
+    nm.className = ov[name] ? "pn ovr" : "pn";
+    nm.textContent = name.replace("claude-", "");
+    tbl.appendChild(nm);
+    inputs[name] = [];
+    for (const i of [0, 1]){
+      const inp = document.createElement("input");
+      inp.type = "number"; inp.step = "0.01"; inp.min = "0";
+      inp.value = eff[i];
+      inp.onchange = commit;
+      inputs[name].push(inp);
+      tbl.appendChild(inp);
+    }
+  }
   body.appendChild(tbl);
+  const note = document.createElement("div");
+  note.className = "cfg-note";
+  note.textContent = "правь цифры — пересчёт всей истории мгновенный; " +
+                     "бирюзовая модель = своя цена";
+  body.appendChild(note);
+  if (Object.keys(ov).length){
+    const rb = document.createElement("button");
+    rb.className = "chipbtn";
+    rb.style.marginTop = "10px";
+    rb.textContent = "сбросить цены к прайсу";
+    rb.onclick = () => postCfg({prices: {}});
+    body.appendChild(rb);
+  }
 }
 async function postCfg(partial){
   cfgCache = await (await fetch("/config",

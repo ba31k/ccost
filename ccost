@@ -71,9 +71,13 @@ TS_FORMATS = ("%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ")
 # ---------------------------------------------------------------- конфиг
 
 CONFIG_PATH = os.path.expanduser("~/.ccost.json")
+VERSION = "1.4.0"
+
 DEFAULT_CFG = {"sources": {"claude": True, "codex": True},
                "claude_root": None, "codex_root": None,
-               "refresh_ms": 3000, "default_period": 0}
+               "refresh_ms": 3000, "default_period": 0,
+               "menubar": True, "check_updates": True,
+               "prices": {}}     # переопределение цен: {модель: [in, out(, cached)]}
 SOURCES = ("claude", "codex")
 
 
@@ -123,7 +127,19 @@ def source_roots():
 
 def price_for(model):
     """(input, output, cached) $/1M; префикс-матч длиннейшим ключом
-    (иначе gpt-5 перехватит gpt-5.4). None — модели нет в прайсе."""
+    (иначе gpt-5 перехватит gpt-5.4). Сначала — переопределения из конфига.
+    None — модели нет в прайсе."""
+    ov = CFG.get("prices") or {}
+    hit = ov.get(model)
+    if hit is None:
+        for k in sorted(ov, key=len, reverse=True):
+            if model.startswith(k):
+                hit = ov[k]
+                break
+    if hit:
+        pin, pout = float(hit[0]), float(hit[1])
+        pc = float(hit[2]) if len(hit) > 2 else pin * CACHE_READ
+        return pin, pout, pc
     for table, anthropic in ((PRICE, True), (PRICE_OPENAI, False)):
         p = table.get(model)
         if p is None:
@@ -212,7 +228,7 @@ class Collector:
     возможным live-режим. Источники: Claude Code (дедуп по message.id,
     пофилдовый максимум) и Codex/OpenAI (события token_count)."""
 
-    def __init__(self):
+    def __init__(self, use_cache=True):
         self.by_mid = {}
         self.records = []
         self.titles = {}
@@ -223,8 +239,11 @@ class Collector:
         self.codex_state = {}    # путь -> {sid, proj, model, tools} (стейт файла)
         self.dirty = set()       # записи, которым нужно пересчитать cost
         self.progress = (0, 0)   # (файлов разобрано, всего) — для GUI-прогресса
+        self.track_keys = False  # режим воркера: помнить дедуп-ключ записи
+        self._rec_keys = {}
         self._saved_at = 0.0
-        self.load_cache()        # тёплый старт: снапшот вместо повторного парса
+        if use_cache:
+            self.load_cache()    # тёплый старт: снапшот вместо повторного парса
 
     # ------------------------------------------------------------ снапшот
     # Полный парс 1+ГБ JSONL занимает секунды; снапшот разобранного состояния
@@ -234,9 +253,7 @@ class Collector:
 
     @staticmethod
     def _cache_ver():
-        import zlib
-        tables = json.dumps([PRICE, PRICE_OPENAI], sort_keys=True)
-        return (1, zlib.crc32(tables.encode()))   # смена цен = пересчёт
+        return (2,)              # цены в снапшот не входят — recost() на загрузке
 
     @staticmethod
     def _cache_path():
@@ -265,12 +282,23 @@ class Collector:
             self.by_mid[mid] = self.records[i]
         self.pos = data["pos"]
         self.titles = data["titles"]
-        self.unknown = data["unknown"]
         self.seen_tools = data["seen_tools"]
         self.seen_codex = data["seen_codex"]
         self.codex_state = data["codex_state"]
         self._saved_at = time.time()
+        self.recost()            # цены могли смениться со времени снапшота
         return True
+
+    def recost(self):
+        """Пересчитать стоимость всех записей по текущему прайсу
+        (включая переопределения из конфига)."""
+        self.unknown = set()
+        for r in self.records:
+            c = cost_of(r.model, r.tin, r.tout, r.cw, r.cr, r.cw1h)
+            if c is None:
+                self.unknown.add(r.model)
+                c = 0.0
+            r.cost = c
 
     def save_cache(self):
         import pickle
@@ -305,37 +333,29 @@ class Collector:
                 continue
             pat = os.path.join(roots[src], "**", "*.jsonl")
             jobs += [(src, fp) for fp in glob.glob(pat, recursive=True)]
-        for n, (src, fp) in enumerate(jobs):
-            self.progress = (n + 1, len(jobs))
+        pending = []
+        total_new = 0
+        for src, fp in jobs:
             try:
                 size = os.path.getsize(fp)
             except OSError:
                 continue
             done = self.pos.get(fp, 0)
-            if size == done:
-                continue
-            if size < done:
-                done = 0             # файл переписан — читаем заново (дедуп спасает)
+            if size != done:
+                pending.append((src, fp))
+                total_new += size - done if size > done else size
+        # холодный старт: сотни мегабайт разбираем в несколько процессов
+        if total_new > 200 * 1024 * 1024 and len(pending) > 8:
             try:
-                fh = open(fp, "rb")
-            except OSError:
-                continue
-            with fh:
-                fh.seek(done)
-                data = fh.read()
-            end = data.rfind(b"\n") + 1
-            if end == 0:
-                continue             # недописанная строка — дождёмся следующего тика
-            self.pos[fp] = done + end
-            for raw in data[:end].split(b"\n"):
-                if not raw:
-                    continue
-                line = raw.decode("utf-8", "replace")
-                if src == "claude":
-                    if self._line(line):
-                        changed = True
-                elif self._line_codex(fp, line):
+                if self._scan_parallel(pending):
                     changed = True
+                pending = []
+            except Exception:
+                pass                 # фолбэк — последовательный разбор ниже
+        for n, (src, fp) in enumerate(pending):
+            self.progress = (n + 1, len(pending))
+            if self._parse_file(src, fp):
+                changed = True
         if self.dirty:
             for r in self.dirty:
                 c = cost_of(r.model, r.tin, r.tout, r.cw, r.cr, r.cw1h)
@@ -347,6 +367,88 @@ class Collector:
             changed = True
         if changed and time.time() - self._saved_at > 300:
             self.save_cache()      # раз в ~5 минут; потеря — лишь дочитать хвост
+        return changed
+
+    def _parse_file(self, src, fp):
+        """Дочитать один файл с сохранённой позиции. True — что-то разобрано."""
+        try:
+            size = os.path.getsize(fp)
+        except OSError:
+            return False
+        done = self.pos.get(fp, 0)
+        if size == done:
+            return False
+        if size < done:
+            done = 0                 # файл переписан — заново (дедуп спасает)
+        try:
+            fh = open(fp, "rb")
+        except OSError:
+            return False
+        with fh:
+            fh.seek(done)
+            data = fh.read()
+        end = data.rfind(b"\n") + 1
+        if end == 0:
+            return False             # недописанная строка — дождёмся тика
+        self.pos[fp] = done + end
+        changed = False
+        for raw in data[:end].split(b"\n"):
+            if not raw:
+                continue
+            line = raw.decode("utf-8", "replace")
+            if src == "claude":
+                if self._line(line):
+                    changed = True
+            elif self._line_codex(fp, line):
+                changed = True
+        return changed
+
+    def _scan_parallel(self, pending):
+        """Холодный парс по процессам; слияние с дедупликацией:
+        claude — пофилдовый максимум по message.id, codex — по ключу события."""
+        import multiprocessing as mp
+        nproc = max(2, min(4, os.cpu_count() or 2))
+        chunks = [c for c in (pending[i::nproc] for i in range(nproc)) if c]
+        self.progress = (0, len(pending))
+        done_files = 0
+        changed = False
+        with mp.get_context("spawn").Pool(len(chunks)) as pool:
+            for part in pool.imap_unordered(_parse_chunk, chunks):
+                done_files += part["files"]
+                self.progress = (done_files, len(pending))
+                if self._merge_partial(part):
+                    changed = True
+        return changed
+
+    def _merge_partial(self, part):
+        changed = False
+        for tup, key in zip(part["recs"], part["keys"]):
+            r = Rec()
+            for f, v in zip(self._REC_FIELDS, tup):
+                setattr(r, f, v)
+            if key is not None and key[0] == "mid":
+                cur = self.by_mid.get(key[1])
+                if cur is not None:      # копия сообщения из другого воркера
+                    for f in ("tin", "tout", "cw", "cr", "cw1h"):
+                        v = getattr(r, f)
+                        if v > getattr(cur, f):
+                            setattr(cur, f, v)
+                    self.dirty.add(cur)
+                    changed = True
+                    continue
+                self.by_mid[key[1]] = r
+            elif key is not None and key[0] == "cx":
+                if key[1] in self.seen_codex:
+                    continue
+                self.seen_codex.add(key[1])
+            self.records.append(r)
+            self.dirty.add(r)
+            changed = True
+        for sid, t in part["titles"].items():
+            self.titles.setdefault(sid, t)
+        self.seen_tools |= part["seen_tools"]
+        self.pos.update(part["pos"])
+        self.codex_state.update(part["codex_state"])
         return changed
 
     def _line(self, line):
@@ -387,10 +489,13 @@ class Collector:
             r.project = os.path.basename(cwd) or "?"
             r.tin, r.tout, r.cw, r.cr, r.cw1h = tin, tout, cw, cr, cw1h
             r.t = 0.0
+            r.cost = 0.0
             r.day, r.hour, r.wd = "?", -1, -1
             r.tools = ()
             self.by_mid[mid] = r
             self.records.append(r)
+            if self.track_keys:
+                self._rec_keys[id(r)] = ("mid", mid) if isinstance(mid, str) else None
             touched = True
         else:
             # стриминг: строки одного сообщения с растущим usage
@@ -524,7 +629,10 @@ class Collector:
         r.tools = tuple(st["tools"])
         st["tools"] = []
         r.t = 0.0
+        r.cost = 0.0
         r.day, r.hour, r.wd = "?", -1, -1
+        if self.track_keys:
+            self._rec_keys[id(r)] = ("cx", key)
         t = parse_ts(o.get("timestamp"))
         if t:
             r.t = t
@@ -535,6 +643,23 @@ class Collector:
         self.records.append(r)
         self.dirty.add(r)
         return True
+
+
+def _parse_chunk(files):
+    """Воркер параллельного холодного парса (Collector._scan_parallel):
+    разбирает свою пачку файлов и возвращает сериализуемое состояние."""
+    co = Collector(use_cache=False)
+    co.track_keys = True
+    for src, fp in files:
+        co._parse_file(src, fp)
+    return {
+        "recs": [tuple(getattr(r, f) for f in Collector._REC_FIELDS)
+                 for r in co.records],
+        "keys": [co._rec_keys.get(id(r)) for r in co.records],
+        "titles": co.titles, "seen_tools": co.seen_tools,
+        "pos": co.pos, "codex_state": co.codex_state,
+        "files": len(files),
+    }
 
 
 # ---------------------------------------------------------------- агрегация
@@ -595,6 +720,68 @@ def cache_saved(records):
                   - cw5 * pin * (CACHE_W_5M - 1)
                   - r.cw1h * pin * (CACHE_W_1H - 1)) / 1e6
     return saved
+
+
+def fun_records(records, titles):
+    """Рекорды за всю историю — фан-факты для дашборда."""
+    if not records:
+        return []
+    hourly = defaultdict(float)
+    daily = defaultdict(float)
+    day_tok = defaultdict(int)
+    sess = {}
+    tools = Counter()
+    for r in records:
+        if r.day != "?":
+            daily[r.day] += r.cost
+            day_tok[r.day] += r.tin + r.tout + r.cw + r.cr
+            if r.hour >= 0:
+                hourly[(r.day, r.hour)] += r.cost
+        if r.t:
+            a = sess.setdefault(r.session, [r.t, r.t, 0.0])
+            a[0] = min(a[0], r.t)
+            a[1] = max(a[1], r.t)
+            a[2] += r.cost
+        for name in r.tools:
+            tools[name] += 1
+    out = []
+
+    def add(label, value, sub):
+        out.append({"label": label, "value": value, "sub": sub})
+
+    if hourly:
+        (d, hh), c = max(hourly.items(), key=lambda kv: kv[1])
+        add("самый дорогой час", money(c), f"{d} {hh:02d}:00")
+    if daily:
+        d, c = max(daily.items(), key=lambda kv: kv[1])
+        add("самый дорогой день", money(c), d)
+    if day_tok:
+        d, n = max(day_tok.items(), key=lambda kv: kv[1])
+        add("рекорд токенов за день", h(n), d)
+    if sess:
+        sid, (t0, t1, c) = max(sess.items(), key=lambda kv: kv[1][2])
+        add("самый дорогой чат", money(c), titles.get(sid, "(" + str(sid)[:8] + ")")[:44])
+        sid, (t0, t1, c) = max(sess.items(), key=lambda kv: kv[1][1] - kv[1][0])
+        dur = t1 - t0
+        add("самый долгий чат", f"{dur / 3600:.1f} ч",
+            titles.get(sid, "(" + str(sid)[:8] + ")")[:44])
+    ds = sorted(daily)
+    if ds:
+        best_n, best_end, n, prev = 1, ds[0], 1, ds[0]
+        for d in ds[1:]:
+            try:
+                gap = (date.fromisoformat(d) - date.fromisoformat(prev)).days
+            except ValueError:
+                gap = 99
+            n = n + 1 if gap == 1 else 1
+            if n > best_n:
+                best_n, best_end = n, d
+            prev = d
+        add("лучший стрик", f"{best_n} дн.", "по " + best_end)
+    if tools:
+        name, calls = tools.most_common(1)[0]
+        add("любимый инструмент", f"{calls:,}".replace(",", " "), name)
+    return out
 
 
 def streak_of(days):
@@ -932,7 +1119,56 @@ def gui_payload(co, period, day=None):
         "heat": [[round(v, 2) for v in row] for row in heat],
         "models": models, "chats": chats, "tools": tools, "hours": hours,
         "unknown": sorted(co.unknown),
+        "records": fun_records(enabled, co.titles),
+        "year": _year_series(enabled),
+        "version": VERSION,
+        "update": UPDATE.get("info"),
     }
+
+
+def _year_series(records):
+    """365 дней стоимости для годового календаря (вся история, без периода)."""
+    daily = defaultdict(float)
+    for r in records:
+        if r.day != "?":
+            daily[r.day] += r.cost
+    end = date.today()
+    out = []
+    d = end - timedelta(days=364)
+    while d <= end:
+        k = d.isoformat()
+        out.append({"d": k, "c": round(daily.get(k, 0.0), 2)})
+        d += timedelta(days=1)
+    return out
+
+
+UPDATE = {"info": None}
+
+
+def check_updates_loop():
+    """Раз в 6 часов смотрит последний релиз на GitHub (если включено)."""
+    import urllib.request
+
+    def ver(s):
+        nums = re.findall(r"\d+", s or "")
+        return tuple(int(x) for x in nums[:3]) or (0,)
+
+    while True:
+        if CFG.get("check_updates", True):
+            try:
+                req = urllib.request.Request(
+                    "https://api.github.com/repos/ba31k/ccost/releases/latest",
+                    headers={"User-Agent": "ccost/" + VERSION})
+                with urllib.request.urlopen(req, timeout=8) as resp:
+                    latest = json.loads(resp.read().decode("utf-8"))
+                tag = latest.get("tag_name") or ""
+                if ver(tag) > ver(VERSION):
+                    UPDATE["info"] = {"tag": tag, "url": latest.get("html_url")}
+                else:
+                    UPDATE["info"] = None
+            except Exception:
+                pass
+        time.sleep(6 * 3600)
 
 
 GUI_HTML = r"""<!doctype html>
@@ -1182,12 +1418,46 @@ body.chrome-win #drawer{top:30px}
   font:11.5px var(--mono); color:var(--dim)}
 .pricetbl .ph{color:var(--amber); font:600 10px var(--sans);
   text-transform:uppercase; letter-spacing:.1em}
+
+/* баннер обновления */
+#upd{font:700 11px var(--mono); color:#0b0e12; background:var(--amber);
+  border-radius:6px; padding:3px 9px; text-decoration:none; align-self:center}
+#upd:hover{filter:brightness(1.12)}
+/* годовой календарь */
+#yearwrap{overflow-x:auto; padding-bottom:4px}
+#yearmonths{position:relative; height:14px; font:10px var(--mono); color:var(--dim)}
+#yearmonths span{position:absolute; top:0}
+#year{display:grid; grid-auto-flow:column; grid-template-rows:repeat(7,11px);
+  grid-auto-columns:11px; gap:3px; width:max-content}
+#year i{border-radius:2.5px; background:#141b24;
+  transition:background .5s ease}
+#year i.has{cursor:pointer}
+#year i.has:hover{outline:1px solid var(--teal)}
+/* рекорды */
+#recs{display:grid; grid-template-columns:repeat(auto-fit,minmax(205px,1fr)); gap:12px}
+.rec{border:1px solid var(--line); border-radius:8px; padding:11px 13px;
+  background:var(--panel2)}
+.rec .rl{font:600 10px var(--sans); text-transform:uppercase;
+  letter-spacing:.11em; color:var(--amber)}
+.rec .rv{font:600 19px var(--mono); color:var(--money); margin-top:5px;
+  font-variant-numeric:tabular-nums}
+.rec .rs{color:var(--dim); font:11px var(--mono); margin-top:3px;
+  white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+/* редактируемые цены */
+.pricetbl input{width:70px; appearance:none; border:1px solid var(--line);
+  background:var(--panel2); color:var(--ink); font:11.5px var(--mono);
+  border-radius:5px; padding:3px 6px; text-align:right}
+.pricetbl input:focus{outline:1px solid var(--teal)}
+.pricetbl .pn{align-self:center}
+.pricetbl .pn.ovr{color:var(--teal)}
+.cfg-note{color:var(--dim); font:11px var(--mono); margin-top:8px}
 </style>
 </head>
 <body>
 <header>
   <div class="brand">ccost <span id="livedot"></span><span id="livelbl">live</span></div>
   <span id="conn" hidden>нет связи</span>
+  <a id="upd" hidden target="_blank" rel="noopener"></a>
   <div class="hright">
     <nav id="periods" aria-label="период"></nav>
     <button id="gear" aria-label="настройки" title="настройки"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.09a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.09a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.09a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg></button>
@@ -1228,6 +1498,17 @@ body.chrome-win #drawer{top:30px}
     <h2>часы суток</h2>
     <div class="chart" id="hourchart" style="height:120px"></div>
     <div class="axis axis24"><span>00</span><span>06</span><span>12</span><span>18</span><span>23</span></div>
+  </section>
+  <section class="panel">
+    <h2>год</h2>
+    <div id="yearwrap">
+      <div id="yearmonths"></div>
+      <div id="year"></div>
+    </div>
+  </section>
+  <section class="panel">
+    <h2>рекорды</h2>
+    <div id="recs"></div>
   </section>
   <footer>ccost · live-дашборд · периоды: ←/→ или свайп · клик по бару дня — детали дня (Esc — сброс)</footer>
 </main>
@@ -1364,7 +1645,7 @@ for (const [lbl, key] of CARD_DEFS){
 /* ------------------------------------------------ рендер */
 const WD = ["пн","вт","ср","чт","пт","сб","вс"];
 let lastSig = null;
-const R = {days: [], grid: [], heat: [], models: [], chats: [], tools: [], hours: []};
+const R = {days: [], grid: [], heat: [], models: [], chats: [], tools: [], hours: [], year: []};
 
 function sigOf(d){
   if (!d.total) return "empty" + d.period;
@@ -1454,12 +1735,89 @@ function render(d, fresh){
   lerpMoney(cardRef.cAvg.val, t.avg_day, fresh);
   cardRef.cAvg.sub.textContent = "пик " + t.busiest_day + " · " + money(t.busiest_cost);
 
+  const up = $("upd");
+  if (d.update){
+    up.hidden = false;
+    up.textContent = "вышла " + d.update.tag;
+    up.href = d.update.url;
+  } else up.hidden = true;
+
   renderDays(d, fresh);
   renderHeat(d, fresh);
   renderModels(d, fresh);
   renderChats(d, fresh);
   renderTools(d, fresh);
   renderHours(d, fresh);
+  renderYear(d, fresh);
+  renderRecs(d, fresh);
+}
+
+const MONTHS = ["янв","фев","мар","апр","май","июн","июл","авг","сен","окт","ноя","дек"];
+function gotoDay(day){
+  if (period !== 0){
+    pi = 0; period = 0;
+    nav.querySelectorAll("button").forEach((x, j) => x.className = j === 0 ? "on" : "");
+    moveThumb();
+  }
+  setDaySel(day);
+}
+function renderYear(d, fresh){
+  const y = d.year || [];
+  if (!y.length) return;
+  const mx = Math.max(...y.map(x => x.c), 0.01);
+  const first = new Date(y[0].d + "T00:00:00");
+  const pad = (first.getDay() + 6) % 7;         // пн = 0
+  if (fresh || R.year.length !== y.length){
+    const box = $("year");
+    box.replaceChildren();
+    R.year = [];
+    for (let i = 0; i < pad; i++)
+      box.appendChild(document.createElement("i"));
+    for (const x of y){
+      const c = document.createElement("i");
+      c.addEventListener("click", () => { if (c._day && c.classList.contains("has")) gotoDay(c._day); });
+      bindTip(c);
+      box.appendChild(c);
+      R.year.push(c);
+    }
+    const mrow = $("yearmonths");
+    mrow.replaceChildren();
+    let prev = -1;
+    y.forEach((x, i) => {
+      const dt = new Date(x.d + "T00:00:00");
+      if (dt.getDate() <= 7 && dt.getMonth() !== prev){
+        prev = dt.getMonth();
+        const s = document.createElement("span");
+        s.textContent = MONTHS[prev];
+        s.style.left = (Math.floor((i + pad) / 7) * 14) + "px";
+        mrow.appendChild(s);
+      }
+    });
+    mrow.style.width = (Math.ceil((y.length + pad) / 7) * 14) + "px";
+  }
+  y.forEach((x, i) => {
+    const c = R.year[i];
+    if (!c) return;
+    const a = x.c <= 0 ? 0 : 0.16 + 0.84 * Math.pow(x.c / mx, 0.55);
+    c.style.background = x.c > 0 ? "rgba(45,212,200," + a.toFixed(3) + ")" : "";
+    c.classList.toggle("has", x.c > 0);
+    c._day = x.d;
+    c._tip = esc(x.d) + " · <b>" + money(x.c) + "</b>";
+  });
+}
+function renderRecs(d, fresh){
+  const box = $("recs");
+  box.replaceChildren();
+  for (const [i, rec] of (d.records || []).entries()){
+    const el = document.createElement("div");
+    el.className = "rec";
+    el.innerHTML = '<div class="rl"></div><div class="rv"></div><div class="rs"></div>';
+    el.children[0].textContent = rec.label;
+    el.children[1].textContent = rec.value;
+    el.children[2].textContent = rec.sub;
+    if (fresh) stag(el, i, 30);
+    box.appendChild(el);
+  }
 }
 
 function renderDays(d, fresh){
@@ -1794,23 +2152,80 @@ function renderCfg(){
   head("период при старте");
   body.appendChild(chipRow(PERIODS.map(p => [p[0], p[1]]),
                            c.default_period, v => postCfg({default_period: v})));
+  head("приложение");
+  for (const [key, label] of [["menubar","счётчик в menu bar (мак)"],
+                              ["check_updates","проверять обновления"]]){
+    const row = document.createElement("label");
+    row.className = "srcrow";
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.checked = !!c[key];
+    cb.onchange = () => postCfg({[key]: cb.checked});
+    const tgl = document.createElement("span");
+    tgl.className = "tgl";
+    const info = document.createElement("div");
+    info.className = "srcinfo";
+    const n1 = document.createElement("div");
+    n1.textContent = label;
+    info.append(n1);
+    row.append(cb, tgl, info);
+    body.appendChild(row);
+  }
   head("прайс · $ за 1M токенов");
+  const defaults = {};
+  for (const [n, p] of Object.entries(cfgCache.prices.anthropic))
+    defaults[n] = [p[0], p[1]];
+  for (const [n, p] of Object.entries(cfgCache.prices.openai))
+    defaults[n] = [p[0], p[1]];
+  const ov = c.prices || {};
+  const inputs = {};
   const tbl = document.createElement("div");
   tbl.className = "pricetbl";
-  const row3 = (a, b, cc, ph) => {
-    for (const t of [a, b, cc]){
-      const e = document.createElement("div");
-      if (ph) e.className = "ph";
-      e.textContent = t;
-      tbl.appendChild(e);
+  for (const t of ["модель", "in", "out"]){
+    const e = document.createElement("div");
+    e.className = "ph"; e.textContent = t;
+    tbl.appendChild(e);
+  }
+  const commit = () => {
+    const out = {};
+    for (const [name, def] of Object.entries(defaults)){
+      const vin = parseFloat(inputs[name][0].value);
+      const vout = parseFloat(inputs[name][1].value);
+      if (isFinite(vin) && isFinite(vout) && (vin !== def[0] || vout !== def[1]))
+        out[name] = [vin, vout];
     }
+    postCfg({prices: out});
   };
-  row3("модель", "in", "out", true);
-  for (const [name, p] of Object.entries(cfgCache.prices.anthropic))
-    row3(name.replace("claude-",""), "$" + p[0], "$" + p[1]);
-  for (const [name, p] of Object.entries(cfgCache.prices.openai))
-    row3(name, "$" + p[0], "$" + p[1]);
+  for (const [name, def] of Object.entries(defaults)){
+    const eff = ov[name] || def;
+    const nm = document.createElement("div");
+    nm.className = ov[name] ? "pn ovr" : "pn";
+    nm.textContent = name.replace("claude-", "");
+    tbl.appendChild(nm);
+    inputs[name] = [];
+    for (const i of [0, 1]){
+      const inp = document.createElement("input");
+      inp.type = "number"; inp.step = "0.01"; inp.min = "0";
+      inp.value = eff[i];
+      inp.onchange = commit;
+      inputs[name].push(inp);
+      tbl.appendChild(inp);
+    }
+  }
   body.appendChild(tbl);
+  const note = document.createElement("div");
+  note.className = "cfg-note";
+  note.textContent = "правь цифры — пересчёт всей истории мгновенный; " +
+                     "бирюзовая модель = своя цена";
+  body.appendChild(note);
+  if (Object.keys(ov).length){
+    const rb = document.createElement("button");
+    rb.className = "chipbtn";
+    rb.style.marginTop = "10px";
+    rb.textContent = "сбросить цены к прайсу";
+    rb.onclick = () => postCfg({prices: {}});
+    body.appendChild(rb);
+  }
 }
 async function postCfg(partial){
   cfgCache = await (await fetch("/config",
@@ -1904,6 +2319,7 @@ def _gui_server(co, port=0):
         ready.set()
 
     threading.Thread(target=initial_scan, daemon=True).start()
+    threading.Thread(target=check_updates_loop, daemon=True).start()
 
     cache = {}
 
@@ -1987,8 +2403,25 @@ def _gui_server(co, port=0):
                 CFG["refresh_ms"] = max(1000, min(60000, upd["refresh_ms"]))
             if isinstance(upd.get("default_period"), int):
                 CFG["default_period"] = upd["default_period"] % len(PERIODS)
+            for key in ("menubar", "check_updates"):
+                if isinstance(upd.get(key), bool):
+                    CFG[key] = upd[key]
+            reprice = False
+            if isinstance(upd.get("prices"), dict):
+                clean = {}
+                for k, v in upd["prices"].items():
+                    if isinstance(k, str) and isinstance(v, list) \
+                            and 2 <= len(v) <= 3:
+                        try:
+                            clean[k] = [max(0.0, float(x)) for x in v]
+                        except (TypeError, ValueError):
+                            continue
+                CFG["prices"] = clean
+                reprice = True
             save_config(CFG)
             with lock:
+                if reprice:
+                    co.recost()
                 cache.clear()
             body = json.dumps(config_info(), ensure_ascii=False).encode("utf-8")
             self._send(body, "application/json; charset=utf-8")
@@ -2725,4 +3158,6 @@ def main():
 
 
 if __name__ == "__main__":
+    import multiprocessing
+    multiprocessing.freeze_support()   # параллельный парс во frozen-бинарях
     main()

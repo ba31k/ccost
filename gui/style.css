@@ -237,3 +237,36 @@ body.chrome-win #drawer{top:30px}
   font:11.5px var(--mono); color:var(--dim)}
 .pricetbl .ph{color:var(--amber); font:600 10px var(--sans);
   text-transform:uppercase; letter-spacing:.1em}
+
+/* баннер обновления */
+#upd{font:700 11px var(--mono); color:#0b0e12; background:var(--amber);
+  border-radius:6px; padding:3px 9px; text-decoration:none; align-self:center}
+#upd:hover{filter:brightness(1.12)}
+/* годовой календарь */
+#yearwrap{overflow-x:auto; padding-bottom:4px}
+#yearmonths{position:relative; height:14px; font:10px var(--mono); color:var(--dim)}
+#yearmonths span{position:absolute; top:0}
+#year{display:grid; grid-auto-flow:column; grid-template-rows:repeat(7,11px);
+  grid-auto-columns:11px; gap:3px; width:max-content}
+#year i{border-radius:2.5px; background:#141b24;
+  transition:background .5s ease}
+#year i.has{cursor:pointer}
+#year i.has:hover{outline:1px solid var(--teal)}
+/* рекорды */
+#recs{display:grid; grid-template-columns:repeat(auto-fit,minmax(205px,1fr)); gap:12px}
+.rec{border:1px solid var(--line); border-radius:8px; padding:11px 13px;
+  background:var(--panel2)}
+.rec .rl{font:600 10px var(--sans); text-transform:uppercase;
+  letter-spacing:.11em; color:var(--amber)}
+.rec .rv{font:600 19px var(--mono); color:var(--money); margin-top:5px;
+  font-variant-numeric:tabular-nums}
+.rec .rs{color:var(--dim); font:11px var(--mono); margin-top:3px;
+  white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+/* редактируемые цены */
+.pricetbl input{width:70px; appearance:none; border:1px solid var(--line);
+  background:var(--panel2); color:var(--ink); font:11.5px var(--mono);
+  border-radius:5px; padding:3px 6px; text-align:right}
+.pricetbl input:focus{outline:1px solid var(--teal)}
+.pricetbl .pn{align-self:center}
+.pricetbl .pn.ovr{color:var(--teal)}
+.cfg-note{color:var(--dim); font:11px var(--mono); margin-top:8px}
