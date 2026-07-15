@@ -622,13 +622,17 @@ def print_json(co):
 
 # ---------------------------------------------------------------- GUI (браузер)
 
-def gui_payload(co, period):
-    """Все данные дашборда одним куском; вызывается на каждый poll."""
-    f = apply_period(co.records, period)
+def gui_payload(co, period, day=None):
+    """Все данные дашборда одним куском; вызывается на каждый poll.
+    day=YYYY-MM-DD — детализация дня: график остаётся периодным (контекст),
+    всё остальное считается по выбранному дню."""
+    f_all = apply_period(co.records, period)
+    f = [r for r in f_all if r.day == day] if day else f_all
     ov = overview(f)
     if not ov:
-        return {"total": None, "period": period, "unknown": sorted(co.unknown)}
-    days_agg = aggregate(f, lambda r: r.day)
+        return {"total": None, "period": period, "day": day,
+                "unknown": sorted(co.unknown)}
+    days_agg = aggregate(f_all, lambda r: r.day)
     days_agg.pop("?", None)
     heat = [[0.0] * 24 for _ in range(7)]
     for r in f:
@@ -658,6 +662,7 @@ def gui_payload(co, period):
              for hh in range(24)]
     return {
         "period": period,
+        "day": day,
         "today_str": datetime.now().strftime("%Y-%m-%d"),
         "total": {
             "cost": round(ov["cost"], 2), "tok": ov["tok"],
@@ -789,6 +794,12 @@ main.dim{opacity:.45}
   border-radius:2px 2px 0 0; cursor:default;
   transition:height .65s cubic-bezier(.22,.9,.3,1)}
 .bars .b.today{background:linear-gradient(180deg,#f0d084,#c99f45)}
+#daychart .b{cursor:pointer}
+.bars .b.sel{outline:1.5px solid var(--amber);
+  box-shadow:0 0 14px rgba(232,194,104,.35)}
+body.day-mode .cards{display:none}
+#daysel{color:var(--teal); font:12px var(--mono); letter-spacing:0;
+  text-transform:none; margin-left:8px}
 .bars .b:hover{filter:brightness(1.3)}
 .axis{display:flex; justify-content:space-between; color:var(--dim);
   font:10.5px var(--mono); margin-top:6px}
@@ -867,7 +878,7 @@ footer{color:var(--dim); font:11px var(--mono); text-align:center; padding:4px 0
   <div class="warn" id="warn" hidden></div>
   <section class="cards" id="cards"></section>
   <section class="panel">
-    <h2>стоимость по дням</h2>
+    <h2>стоимость по дням<span id="daysel" hidden></span></h2>
     <div class="chart" id="daychart"></div>
     <div class="axis" id="dayaxis"></div>
   </section>
@@ -893,7 +904,7 @@ footer{color:var(--dim); font:11px var(--mono); text-align:center; padding:4px 0
     <div class="chart" id="hourchart" style="height:120px"></div>
     <div class="axis axis24"><span>00</span><span>06</span><span>12</span><span>18</span><span>23</span></div>
   </section>
-  <footer>ccost · live-дашборд · периоды: клик, ←/→ или свайп по счётчику</footer>
+  <footer>ccost · live-дашборд · периоды: ←/→ или свайп · клик по бару дня — детали дня (Esc — сброс)</footer>
 </main>
 <div id="tip"></div>
 <script>
@@ -902,6 +913,8 @@ const $ = id => document.getElementById(id);
 const PERIODS = [["всё",0],["месяц",4],["30 дней",3],["7 дней",2],["сегодня",1]];
 let pi = 0;                                   // индекс в PERIODS (визуальный порядок)
 let period = PERIODS[0][1];
+let selDay = null;                            // выбранный день (детализация)
+let LD = [];                                  // последний ряд дней (для листания)
 const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
 const mainEl = document.querySelector("main");
 
@@ -962,13 +975,29 @@ function setPeriod(i){
   i = Math.max(0, Math.min(PERIODS.length - 1, i));
   if (i === pi) return;
   pi = i; period = PERIODS[i][1];
+  setDaySel(null, false);
   nav.querySelectorAll("button").forEach((x, j) => x.className = j === pi ? "on" : "");
   moveThumb();
   mainEl.classList.add("dim");
   tick(true);
 }
+function setDaySel(day, refetch = true){
+  selDay = day;
+  document.body.classList.toggle("day-mode", !!day);
+  const chip = $("daysel");
+  chip.hidden = !day;
+  if (day) chip.textContent = "· " + day + " · Esc — сброс";
+  if (refetch){ mainEl.classList.add("dim"); tick(true); }
+}
 addEventListener("resize", moveThumb);
 addEventListener("keydown", e => {
+  if (e.key === "Escape" && selDay){ setDaySel(null); return; }
+  if (selDay){                                // в режиме дня ←/→ листают дни
+    const i = LD.findIndex(x => x.d === selDay);
+    if (e.key === "ArrowRight" && i >= 0 && i < LD.length - 1) setDaySel(LD[i+1].d);
+    if (e.key === "ArrowLeft" && i > 0) setDaySel(LD[i-1].d);
+    return;
+  }
   if (e.key === "ArrowRight") setPeriod(pi + 1);
   if (e.key === "ArrowLeft") setPeriod(pi - 1);
 });
@@ -1006,7 +1035,7 @@ const R = {days: [], grid: [], heat: [], models: [], chats: [], tools: [], hours
 
 function sigOf(d){
   if (!d.total) return "empty" + d.period;
-  return [d.period, d.days.length, d.models.map(m => m.name).join(","),
+  return [d.period, d.day || "", d.days.length, d.models.map(m => m.name).join(","),
           d.tools.map(t => t.name).join(","),
           d.chats.map(c => c.title).join("~")].join("|");
 }
@@ -1052,7 +1081,8 @@ function render(d, fresh){
   };
   seg(htok(t.tok)); seg(" токенов · "); seg(t.msgs.toLocaleString("ru-RU"));
   seg(" сообщений · "); seg(String(t.sessions)); seg(" чатов · ");
-  seg(t.first + " … " + t.last); seg(" · стрик "); seg(t.streak + " дн.", true);
+  if (d.day){ seg("день "); seg(d.day, true); }
+  else { seg(t.first + " … " + t.last); seg(" · стрик "); seg(t.streak + " дн.", true); }
 
   const w = $("warn");
   if (d.unknown.length){
@@ -1079,6 +1109,7 @@ function render(d, fresh){
 }
 
 function renderDays(d, fresh){
+  LD = d.days;
   const mx = Math.max(...d.days.map(x => x.c), 0.01);
   if (fresh){
     const dc = $("daychart");
@@ -1099,6 +1130,7 @@ function renderDays(d, fresh){
       b.className = "b" + (x.d === d.today_str ? " today" : "");
       b.style.height = "0%";
       if (!reduced) b.style.transitionDelay = Math.min(i*14, 500)+"ms";
+      b.addEventListener("click", () => setDaySel(b._day === selDay ? null : b._day));
       bindTip(b);
       bars.appendChild(b);
       R.days.push(b);
@@ -1122,7 +1154,10 @@ function renderDays(d, fresh){
 function setDayBar(b, x, mx, today){
   b.style.height = Math.max(x.c/mx*100, x.c > 0 ? 1.5 : 0.4) + "%";
   b.classList.toggle("today", x.d === today);
-  b._tip = esc(x.d) + " · <b>" + money(x.c) + "</b>";
+  b.classList.toggle("sel", x.d === selDay);
+  b._day = x.d;
+  b._tip = esc(x.d) + " · <b>" + money(x.c) + "</b>" +
+           (x.d === selDay ? "" : " · клик — детали дня");
 }
 
 function renderHeat(d, fresh){
@@ -1278,7 +1313,7 @@ function renderLoading(l){
 }
 async function tick(force){
   try{
-    const r = await fetch("/data?period=" + period);
+    const r = await fetch("/data?period=" + period + (selDay ? "&day=" + selDay : ""));
     const d = await r.json();
     if (d.loading){
       renderLoading(d.loading);
@@ -1329,17 +1364,18 @@ def serve_gui(co, port=0, open_browser=True):
 
     cache = {}
 
-    def payload(period):
+    def payload(period, day):
         if not ready.is_set():
             done, total = co.progress
             return json.dumps({"loading": {"done": done, "total": total}}).encode()
         with lock:
             if co.scan():
                 cache.clear()
-            if period not in cache:
-                cache[period] = json.dumps(gui_payload(co, period),
-                                           ensure_ascii=False).encode("utf-8")
-            return cache[period]
+            key = (period, day)
+            if key not in cache:
+                cache[key] = json.dumps(gui_payload(co, period, day),
+                                        ensure_ascii=False).encode("utf-8")
+            return cache[key]
 
     class H(BaseHTTPRequestHandler):
         def log_message(self, *a):
@@ -1350,11 +1386,15 @@ def serve_gui(co, port=0, open_browser=True):
             if u.path == "/":
                 body, ctype = GUI_HTML.encode("utf-8"), "text/html; charset=utf-8"
             elif u.path == "/data":
+                q = parse_qs(u.query)
                 try:
-                    period = int(parse_qs(u.query).get("period", ["0"])[0])
+                    period = int(q.get("period", ["0"])[0])
                 except ValueError:
                     period = 0
-                body = payload(period % len(PERIODS))
+                day = q.get("day", [None])[0]
+                if day and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", day):
+                    day = None
+                body = payload(period % len(PERIODS), day)
                 ctype = "application/json; charset=utf-8"
             else:
                 self.send_response(404)
