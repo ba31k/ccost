@@ -715,22 +715,44 @@ header{
 #livedot.off{background:var(--dim); box-shadow:none; animation:none}
 @keyframes pulse{50%{opacity:.35}}
 #livelbl{color:var(--dim); font-size:12px; font-family:var(--mono)}
-nav{display:flex; gap:2px; background:var(--panel); border:1px solid var(--line);
-  border-radius:8px; padding:3px}
+nav{position:relative; display:flex; gap:2px; background:var(--panel);
+  border:1px solid var(--line); border-radius:8px; padding:3px}
+#thumb{position:absolute; top:3px; bottom:3px; left:3px; width:0;
+  background:#182530; border-radius:6px;
+  box-shadow:inset 0 0 0 1px rgba(45,212,200,.28), 0 0 14px rgba(45,212,200,.08);
+  transition:left .32s cubic-bezier(.3,.9,.25,1), width .32s cubic-bezier(.3,.9,.25,1)}
 nav button{
-  appearance:none; border:0; background:transparent; color:var(--dim);
-  font:12px var(--mono); padding:6px 12px; border-radius:6px; cursor:pointer;
+  position:relative; z-index:1; appearance:none; border:0; background:transparent;
+  color:var(--dim); font:12px var(--mono); padding:6px 12px; border-radius:6px;
+  cursor:pointer; transition:color .2s;
 }
 nav button:hover{color:var(--ink)}
 nav button:focus-visible{outline:1px solid var(--teal)}
-nav button.on{background:#182530; color:var(--teal)}
+nav button.on{color:var(--teal)}
 main{max-width:1180px; margin:0 auto; padding:10px 28px 48px;
-  display:flex; flex-direction:column; gap:14px}
+  display:flex; flex-direction:column; gap:14px; transition:opacity .18s ease}
+main.dim{opacity:.45}
 .hero{padding:26px 2px 6px}
 #bigcost{
+  position:relative; display:flex; align-items:baseline; gap:.13em;
   font-family:var(--mono); font-weight:700; letter-spacing:-.02em;
   font-size:clamp(54px,8.5vw,92px); line-height:1; color:var(--money);
-  text-shadow:0 0 34px rgba(126,231,135,.16); font-variant-numeric:tabular-nums;
+  font-variant-numeric:tabular-nums; width:fit-content;
+}
+#bignum{text-shadow:0 0 34px rgba(126,231,135,.16); transition:text-shadow .45s ease}
+#bigcost.burn #bignum{text-shadow:0 0 30px rgba(126,231,135,.5), 0 0 70px rgba(126,231,135,.25)}
+#cursor{display:inline-block; width:.13em; height:.74em; border-radius:2px;
+  background:var(--money); box-shadow:0 0 16px rgba(126,231,135,.45);
+  animation:blink 1.15s infinite; align-self:center}
+@keyframes blink{0%,52%{opacity:1}53%,100%{opacity:.06}}
+.float{position:absolute; left:100%; margin-left:20px; top:4%;
+  font:600 clamp(15px,1.7vw,21px) var(--mono); color:var(--teal);
+  text-shadow:0 0 14px rgba(45,212,200,.55); white-space:nowrap;
+  pointer-events:none; animation:rise 1.7s cubic-bezier(.2,.6,.3,1) forwards}
+@keyframes rise{
+  0%{opacity:0; transform:translateY(16px)}
+  15%{opacity:1}
+  100%{opacity:0; transform:translateY(-40px)}
 }
 .hero-sub{color:var(--dim); margin-top:12px; font-family:var(--mono); font-size:13px}
 .hero-sub b{color:var(--ink); font-weight:600}
@@ -755,9 +777,10 @@ main{max-width:1180px; margin:0 auto; padding:10px 28px 48px;
   font:10.5px var(--mono)}
 .bars{position:absolute; inset:0; display:flex; align-items:flex-end; gap:2px}
 .bars .b{flex:1 1 0; min-width:1px; background:linear-gradient(180deg,#3be3d6,#1a9d94);
-  border-radius:2px 2px 0 0; transition:height .5s ease; cursor:default}
+  border-radius:2px 2px 0 0; cursor:default;
+  transition:height .65s cubic-bezier(.22,.9,.3,1)}
 .bars .b.today{background:linear-gradient(180deg,#f0d084,#c99f45)}
-.bars .b:hover{filter:brightness(1.25)}
+.bars .b:hover{filter:brightness(1.3)}
 .axis{display:flex; justify-content:space-between; color:var(--dim);
   font:10.5px var(--mono); margin-top:6px}
 /* хитмап */
@@ -766,11 +789,13 @@ main{max-width:1180px; margin:0 auto; padding:10px 28px 48px;
   color:var(--dim); font:10.5px var(--mono); line-height:16px}
 .heatgrid{display:grid; grid-template-columns:repeat(24,1fr);
   grid-auto-rows:16px; gap:3px}
-.heatgrid i{border-radius:3px; background:#161d26}
+.heatgrid i{border-radius:3px; background:#161d26;
+  transition:background .6s ease, opacity .4s ease}
 .heatgrid i.peak{outline:1px solid var(--amber)}
 .heathours{grid-column:2; display:flex; justify-content:space-between;
   color:var(--dim); font:10.5px var(--mono); margin-top:2px}
 /* строки-списки */
+@keyframes rowin{from{opacity:0; transform:translateY(6px)} to{opacity:1; transform:none}}
 .rows{display:flex; flex-direction:column}
 .row{display:grid; grid-template-columns:minmax(0,1fr) auto; gap:4px 14px;
   padding:8px 6px; border-radius:6px; align-items:center}
@@ -786,7 +811,7 @@ main{max-width:1180px; margin:0 auto; padding:10px 28px 48px;
 .hbar{position:relative; height:5px; background:#161d26; border-radius:3px;
   overflow:hidden; grid-column:1}
 .hbar i{position:absolute; inset:0 auto 0 0; background:var(--teal);
-  border-radius:3px; transition:width .5s ease}
+  border-radius:3px; transition:width .65s cubic-bezier(.22,.9,.3,1)}
 .mrow{display:grid; grid-template-columns:150px 1fr 84px 100px; gap:12px;
   align-items:center; padding:8px 6px}
 .mrow+.mrow{border-top:1px solid var(--line)}
@@ -814,8 +839,8 @@ footer{color:var(--dim); font:11px var(--mono); text-align:center; padding:4px 0
   <nav id="periods" aria-label="период"></nav>
 </header>
 <main>
-  <section class="hero">
-    <div id="bigcost">$0.00</div>
+  <section class="hero" id="hero">
+    <div id="bigcost"><span id="bignum">$0.00</span><span id="cursor"></span></div>
     <div class="hero-sub" id="herosub">загрузка…</div>
   </section>
   <div class="warn" id="warn" hidden></div>
@@ -847,15 +872,17 @@ footer{color:var(--dim); font:11px var(--mono); text-align:center; padding:4px 0
     <div class="chart" id="hourchart" style="height:120px"></div>
     <div class="axis"><span>00</span><span>06</span><span>12</span><span>18</span><span>23</span></div>
   </section>
-  <footer>ccost · локальный дашборд · обновляется каждые 3 секунды</footer>
+  <footer>ccost · live-дашборд · периоды: клик, ←/→ или свайп по счётчику</footer>
 </main>
 <div id="tip"></div>
 <script>
 "use strict";
 const $ = id => document.getElementById(id);
 const PERIODS = [["всё",0],["месяц",4],["30 дней",3],["7 дней",2],["сегодня",1]];
-let period = 0;
+let pi = 0;                                   // индекс в PERIODS (визуальный порядок)
+let period = PERIODS[0][1];
 const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
+const mainEl = document.querySelector("main");
 
 const money = x => "$" + x.toLocaleString("en-US",{minimumFractionDigits:2, maximumFractionDigits:2});
 function htok(n){
@@ -866,11 +893,11 @@ function htok(n){
 }
 
 /* плавный перекат числа */
-function lerpMoney(el, to){
+function lerpMoney(el, to, instant){
   const from = +el.dataset.v || 0;
   el.dataset.v = to;
-  if (reduced || Math.abs(to-from) < 0.005){ el.textContent = money(to); return; }
-  const t0 = performance.now(), dur = 550;
+  if (instant || reduced || Math.abs(to-from) < 0.005){ el.textContent = money(to); return; }
+  const t0 = performance.now(), dur = 700;
   (function step(t){
     const k = Math.min((t-t0)/dur, 1), e = 1-Math.pow(1-k,3);
     el.textContent = money(from + (to-from)*e);
@@ -878,39 +905,124 @@ function lerpMoney(el, to){
   })(t0);
 }
 
-/* тултип */
+/* тултипы: контент живёт на элементе (переживает live-обновления) */
 const tip = $("tip");
-function bindTip(el, html){
+function bindTip(el){
   el.addEventListener("mousemove", e => {
-    tip.innerHTML = html; tip.style.display = "block";
+    if (!el._tip) return;
+    tip.innerHTML = el._tip; tip.style.display = "block";
     const w = tip.offsetWidth;
     tip.style.left = Math.min(e.clientX+14, innerWidth-w-10)+"px";
     tip.style.top = (e.clientY+16)+"px";
   });
   el.addEventListener("mouseleave", () => tip.style.display = "none");
 }
+function esc(s){ const d = document.createElement("i"); d.textContent = s; return d.innerHTML; }
 
-function card(lbl, val, sub){
+/* ------------------------------------------------ период: бегунок и листание */
+const nav = $("periods");
+const thumb = document.createElement("div");
+thumb.id = "thumb";
+nav.appendChild(thumb);
+for (let i = 0; i < PERIODS.length; i++){
+  const b = document.createElement("button");
+  b.textContent = PERIODS[i][0];
+  if (i === pi) b.className = "on";
+  b.onclick = () => setPeriod(i);
+  nav.appendChild(b);
+}
+function moveThumb(){
+  const b = nav.querySelectorAll("button")[pi];
+  if (!b) return;
+  thumb.style.left = b.offsetLeft + "px";
+  thumb.style.width = b.offsetWidth + "px";
+}
+function setPeriod(i){
+  i = Math.max(0, Math.min(PERIODS.length - 1, i));
+  if (i === pi) return;
+  pi = i; period = PERIODS[i][1];
+  nav.querySelectorAll("button").forEach((x, j) => x.className = j === pi ? "on" : "");
+  moveThumb();
+  mainEl.classList.add("dim");
+  tick(true);
+}
+addEventListener("resize", moveThumb);
+addEventListener("keydown", e => {
+  if (e.key === "ArrowRight") setPeriod(pi + 1);
+  if (e.key === "ArrowLeft") setPeriod(pi - 1);
+});
+/* горизонтальный свайп трекпадом по герою — листает периоды */
+let wacc = 0, wlock = 0;
+$("hero").addEventListener("wheel", e => {
+  if (Math.abs(e.deltaX) <= Math.abs(e.deltaY)) return;
+  e.preventDefault();
+  const now = Date.now();
+  if (now < wlock) return;
+  wacc += e.deltaX;
+  if (wacc > 60){ setPeriod(pi + 1); wlock = now + 450; wacc = 0; }
+  else if (wacc < -60){ setPeriod(pi - 1); wlock = now + 450; wacc = 0; }
+}, {passive: false});
+
+/* ------------------------------------------------ статичные карточки */
+const CARD_DEFS = [
+  ["сегодня", "cToday"], ["прогноз на месяц", "cFc"],
+  ["кэш сэкономил", "cSaved"], ["в среднем за день", "cAvg"],
+];
+const cardRef = {};
+for (const [lbl, key] of CARD_DEFS){
   const d = document.createElement("div");
   d.className = "card";
   d.innerHTML = '<div class="lbl"></div><div class="val"></div><div class="sub"></div>';
   d.children[0].textContent = lbl;
-  d.children[1].textContent = val;
-  d.children[2].textContent = sub;
-  return d;
+  cardRef[key] = {val: d.children[1], sub: d.children[2]};
+  $("cards").appendChild(d);
 }
 
-function render(d){
+/* ------------------------------------------------ рендер */
+const WD = ["пн","вт","ср","чт","пт","сб","вс"];
+let lastSig = null;
+const R = {days: [], grid: [], heat: [], models: [], chats: [], tools: [], hours: []};
+
+function sigOf(d){
+  if (!d.total) return "empty" + d.period;
+  return [d.period, d.days.length, d.models.map(m => m.name).join(","),
+          d.tools.map(t => t.name).join(","),
+          d.chats.map(c => c.title).join("~")].join("|");
+}
+
+function floater(delta){
+  const f = document.createElement("div");
+  f.className = "float";
+  f.textContent = "+" + money(delta);
+  $("bigcost").appendChild(f);
+  setTimeout(() => f.remove(), 1800);
+  const bc = $("bigcost");
+  bc.classList.add("burn");
+  setTimeout(() => bc.classList.remove("burn"), 900);
+}
+
+function stag(el, i, ms){                     // каскадное появление строк
+  if (reduced) return;
+  el.style.animation = "rowin .38s both " + Math.min(i * ms, 500) + "ms";
+}
+
+function render(d, fresh){
   const t = d.total;
   if (!t){
     $("herosub").textContent = "нет данных за период";
-    $("bigcost").textContent = "$0.00"; $("bigcost").dataset.v = 0;
-    for (const id of ["cards","daychart","heat","models","chats","tools","hourchart"])
+    $("bignum").textContent = "$0.00"; $("bignum").dataset.v = 0;
+    for (const id of ["daychart","heat","models","chats","tools","hourchart"])
       $(id).replaceChildren();
+    lastSig = null;
     return;
   }
-  lerpMoney($("bigcost"), t.cost);
+  /* герой + живые «+$» тики */
+  const prev = +$("bignum").dataset.v || 0;
+  if (!fresh && prev > 0 && t.cost > prev + 0.004 && !reduced)
+    floater(t.cost - prev);
+  lerpMoney($("bignum"), t.cost);
   document.title = "ccost · " + money(t.cost);
+
   const hs = $("herosub");
   hs.replaceChildren();
   const seg = (txt, strong) => {
@@ -927,154 +1039,235 @@ function render(d){
     w.textContent = "нет прайса (стоимость = $0): " + d.unknown.join(", ");
   } else w.hidden = true;
 
-  const cards = $("cards");
-  cards.replaceChildren(
-    card("сегодня", money(t.today), "за последний час " + money(t.hour_cost)),
-    card("прогноз на месяц", money(t.forecast), "факт " + money(t.mtd)),
-    card("кэш сэкономил", "≈ " + money(t.saved), "без кэша ≈ " + money(t.cost + t.saved)),
-    card("в среднем за день", money(t.avg_day),
-         "пик " + t.busiest_day + " · " + money(t.busiest_cost)),
-  );
+  /* карточки */
+  lerpMoney(cardRef.cToday.val, t.today, fresh);
+  cardRef.cToday.sub.textContent = "за последний час " + money(t.hour_cost);
+  lerpMoney(cardRef.cFc.val, t.forecast, fresh);
+  cardRef.cFc.sub.textContent = "факт " + money(t.mtd);
+  lerpMoney(cardRef.cSaved.val, t.saved, fresh);
+  cardRef.cSaved.sub.textContent = "без кэша ≈ " + money(t.cost + t.saved);
+  lerpMoney(cardRef.cAvg.val, t.avg_day, fresh);
+  cardRef.cAvg.sub.textContent = "пик " + t.busiest_day + " · " + money(t.busiest_cost);
 
-  /* дни */
-  const dc = $("daychart");
-  dc.replaceChildren();
+  renderDays(d, fresh);
+  renderHeat(d, fresh);
+  renderModels(d, fresh);
+  renderChats(d, fresh);
+  renderTools(d, fresh);
+  renderHours(d, fresh);
+}
+
+function renderDays(d, fresh){
   const mx = Math.max(...d.days.map(x => x.c), 0.01);
-  for (const fr of [1, .5]){
-    const g = document.createElement("div");
-    g.className = "gridline"; g.style.bottom = (fr*100)+"%";
-    g.innerHTML = "<span></span>";
-    g.children[0].textContent = money(mx*fr);
-    dc.appendChild(g);
+  if (fresh){
+    const dc = $("daychart");
+    dc.replaceChildren();
+    R.grid = [];
+    for (const fr of [1, .5]){
+      const g = document.createElement("div");
+      g.className = "gridline"; g.style.bottom = (fr*100)+"%";
+      g.innerHTML = "<span></span>";
+      dc.appendChild(g);
+      R.grid.push([g.children[0], fr]);
+    }
+    const bars = document.createElement("div");
+    bars.className = "bars";
+    R.days = [];
+    d.days.forEach((x, i) => {
+      const b = document.createElement("div");
+      b.className = "b" + (x.d === d.today_str ? " today" : "");
+      b.style.height = "0%";
+      if (!reduced) b.style.transitionDelay = Math.min(i*14, 500)+"ms";
+      bindTip(b);
+      bars.appendChild(b);
+      R.days.push(b);
+    });
+    dc.appendChild(bars);
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      d.days.forEach((x, i) => setDayBar(R.days[i], x, mx, d.today_str));
+      setTimeout(() => R.days.forEach(b => b.style.transitionDelay = ""), 1100);
+    }));
+  } else {
+    d.days.forEach((x, i) => R.days[i] && setDayBar(R.days[i], x, mx, d.today_str));
   }
-  const bars = document.createElement("div");
-  bars.className = "bars";
-  for (const x of d.days){
-    const b = document.createElement("div");
-    b.className = "b" + (x.d === d.today_str ? " today" : "");
-    b.style.height = Math.max(x.c/mx*100, x.c > 0 ? 1.5 : 0.4) + "%";
-    bindTip(b, esc(x.d) + " · <b>" + money(x.c) + "</b>");
-    bars.appendChild(b);
-  }
-  dc.appendChild(bars);
+  for (const [span, fr] of R.grid) span.textContent = money(mx*fr);
   const ax = $("dayaxis");
   ax.replaceChildren();
   for (const s of [d.days[0], d.days[d.days.length-1]]){
     const sp = document.createElement("span");
     sp.textContent = s ? s.d : ""; ax.appendChild(sp);
   }
+}
+function setDayBar(b, x, mx, today){
+  b.style.height = Math.max(x.c/mx*100, x.c > 0 ? 1.5 : 0.4) + "%";
+  b.classList.toggle("today", x.d === today);
+  b._tip = esc(x.d) + " · <b>" + money(x.c) + "</b>";
+}
 
-  /* хитмап */
-  const hm = $("heat");
-  hm.replaceChildren();
+function renderHeat(d, fresh){
   const hmax = Math.max(...d.heat.flat(), 0.01);
-  const wd = ["пн","вт","ср","чт","пт","сб","вс"];
-  document.querySelector(".heatdays").replaceChildren(
-    ...wd.map(x => { const s = document.createElement("span"); s.textContent = x; return s; }));
   let peak = [0,0,0];
   d.heat.forEach((row,i) => row.forEach((v,j) => { if (v > peak[2]) peak = [i,j,v]; }));
-  d.heat.forEach((row,i) => row.forEach((v,j) => {
-    const c = document.createElement("i");
-    const a = v <= 0 ? 0 : 0.14 + 0.86*Math.pow(v/hmax, 0.6);
-    if (v > 0) c.style.background = "rgba(45,212,200," + a.toFixed(3) + ")";
-    if (i === peak[0] && j === peak[1] && v > 0) c.className = "peak";
-    bindTip(c, wd[i] + " " + String(j).padStart(2,"0") + ":00 · <b>" + money(v) + "</b>");
-    hm.appendChild(c);
-  }));
+  if (fresh){
+    const hm = $("heat");
+    hm.replaceChildren();
+    document.querySelector(".heatdays").replaceChildren(
+      ...WD.map(x => { const s = document.createElement("span"); s.textContent = x; return s; }));
+    R.heat = [];
+    d.heat.forEach((row,i) => row.forEach((v,j) => {
+      const c = document.createElement("i");
+      if (!reduced){                          // скан-развёртка слева направо
+        c.style.opacity = "0";
+        c.style.transitionDelay = (j*14 + i*6) + "ms";
+      }
+      bindTip(c);
+      hm.appendChild(c);
+      R.heat.push(c);
+    }));
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      R.heat.forEach((c, n) => setHeatCell(c, d.heat[(n/24)|0][n%24], (n/24)|0, n%24, hmax, peak));
+      R.heat.forEach(c => c.style.opacity = "1");
+      setTimeout(() => R.heat.forEach(c => c.style.transitionDelay = ""), 900);
+    }));
+  } else {
+    R.heat.forEach((c, n) => setHeatCell(c, d.heat[(n/24)|0][n%24], (n/24)|0, n%24, hmax, peak));
+  }
+}
+function setHeatCell(c, v, i, j, hmax, peak){
+  const a = v <= 0 ? 0 : 0.14 + 0.86*Math.pow(v/hmax, 0.6);
+  c.style.background = v > 0 ? "rgba(45,212,200," + a.toFixed(3) + ")" : "";
+  c.classList.toggle("peak", i === peak[0] && j === peak[1] && v > 0);
+  c._tip = WD[i] + " " + String(j).padStart(2,"0") + ":00 · <b>" + money(v) + "</b>";
+}
 
-  /* модели */
-  const mrows = $("models");
-  mrows.replaceChildren();
+function renderModels(d, fresh){
   const mmax = Math.max(...d.models.map(m => m.cost), 0.01);
-  for (const m of d.models){
-    const r = document.createElement("div");
-    r.className = "mrow";
-    r.innerHTML = '<div class="name"></div><div class="hbar"><i></i></div>' +
-                  '<div class="tok"></div><div class="cost"></div>';
-    r.children[0].textContent = m.name;
+  if (fresh){
+    const box = $("models");
+    box.replaceChildren();
+    R.models = [];
+    d.models.forEach((m, i) => {
+      const r = document.createElement("div");
+      r.className = "mrow";
+      r.innerHTML = '<div class="name"></div><div class="hbar"><i></i></div>' +
+                    '<div class="tok"></div><div class="cost"></div>';
+      r.children[0].textContent = m.name;
+      stag(r, i, 40);
+      box.appendChild(r);
+      R.models.push(r);
+    });
+  }
+  d.models.forEach((m, i) => {
+    const r = R.models[i]; if (!r) return;
     r.children[1].firstChild.style.width = (m.cost/mmax*100)+"%";
     r.children[2].textContent = htok(m.tok);
-    r.children[3].textContent = money(m.cost);
-    mrows.appendChild(r);
-  }
+    lerpMoney(r.children[3], m.cost, fresh);
+  });
+}
 
-  /* чаты */
-  const crows = $("chats");
-  crows.replaceChildren();
-  for (const c of d.chats){
-    const r = document.createElement("div");
-    r.className = "row";
-    r.innerHTML = '<div class="name"></div><div class="cost"></div><div class="meta"></div>';
-    r.children[0].textContent = c.title;
-    r.children[1].textContent = money(c.cost);
+function renderChats(d, fresh){
+  if (fresh){
+    const box = $("chats");
+    box.replaceChildren();
+    R.chats = [];
+    d.chats.forEach((c, i) => {
+      const r = document.createElement("div");
+      r.className = "row";
+      r.innerHTML = '<div class="name"></div><div class="cost"></div><div class="meta"></div>';
+      r.children[0].textContent = c.title;
+      stag(r, i, 26);
+      box.appendChild(r);
+      R.chats.push(r);
+    });
+  }
+  d.chats.forEach((c, i) => {
+    const r = R.chats[i]; if (!r) return;
+    lerpMoney(r.children[1], c.cost, fresh);
+    const meta = r.children[2];
+    meta.replaceChildren();
     for (const chip of [c.project, c.model, c.msgs.toLocaleString("ru-RU")+" сообщ."]){
       const s = document.createElement("span");
       s.className = "chip"; s.textContent = chip;
-      r.children[2].appendChild(s);
+      meta.appendChild(s);
     }
-    crows.appendChild(r);
-  }
-
-  /* инструменты */
-  const trows = $("tools");
-  trows.replaceChildren();
-  const tmax = Math.max(...d.tools.map(x => x.calls), 1);
-  for (const x of d.tools){
-    const r = document.createElement("div");
-    r.className = "row";
-    r.innerHTML = '<div class="name"></div><div class="cost"></div>' +
-                  '<div class="hbar" style="grid-column:1"><i></i></div>';
-    r.children[0].textContent = x.name + " · " + x.calls.toLocaleString("ru-RU");
-    r.children[1].textContent = money(x.cost);
-    r.children[2].firstChild.style.width = (x.calls/tmax*100)+"%";
-    trows.appendChild(r);
-  }
-
-  /* часы */
-  const hc = $("hourchart");
-  hc.replaceChildren();
-  const hcmax = Math.max(...d.hours.map(x => x.c), 0.01);
-  const hbars = document.createElement("div");
-  hbars.className = "bars";
-  d.hours.forEach((x,i) => {
-    const b = document.createElement("div");
-    b.className = "b";
-    b.style.height = Math.max(x.c/hcmax*100, x.c > 0 ? 2 : 0.6) + "%";
-    bindTip(b, String(i).padStart(2,"0") + ":00 · <b>" + money(x.c) + "</b> · " + x.m + " сообщ.");
-    hbars.appendChild(b);
   });
-  hc.appendChild(hbars);
 }
 
-function esc(s){ const d = document.createElement("i"); d.textContent = s; return d.innerHTML; }
+function renderTools(d, fresh){
+  const tmax = Math.max(...d.tools.map(x => x.calls), 1);
+  if (fresh){
+    const box = $("tools");
+    box.replaceChildren();
+    R.tools = [];
+    d.tools.forEach((x, i) => {
+      const r = document.createElement("div");
+      r.className = "row";
+      r.innerHTML = '<div class="name"></div><div class="cost"></div>' +
+                    '<div class="hbar" style="grid-column:1"><i></i></div>';
+      stag(r, i, 26);
+      box.appendChild(r);
+      R.tools.push(r);
+    });
+  }
+  d.tools.forEach((x, i) => {
+    const r = R.tools[i]; if (!r) return;
+    r.children[0].textContent = x.name + " · " + x.calls.toLocaleString("ru-RU");
+    lerpMoney(r.children[1], x.cost, fresh);
+    r.children[2].firstChild.style.width = (x.calls/tmax*100)+"%";
+  });
+}
 
-async function tick(){
+function renderHours(d, fresh){
+  const mx = Math.max(...d.hours.map(x => x.c), 0.01);
+  if (fresh){
+    const hc = $("hourchart");
+    hc.replaceChildren();
+    const bars = document.createElement("div");
+    bars.className = "bars";
+    R.hours = [];
+    d.hours.forEach((x, i) => {
+      const b = document.createElement("div");
+      b.className = "b";
+      b.style.height = "0%";
+      if (!reduced) b.style.transitionDelay = (i*16)+"ms";
+      bindTip(b);
+      bars.appendChild(b);
+      R.hours.push(b);
+    });
+    hc.appendChild(bars);
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      d.hours.forEach((x, i) => setHourBar(R.hours[i], x, i, mx));
+      setTimeout(() => R.hours.forEach(b => b.style.transitionDelay = ""), 900);
+    }));
+  } else {
+    d.hours.forEach((x, i) => R.hours[i] && setHourBar(R.hours[i], x, i, mx));
+  }
+}
+function setHourBar(b, x, i, mx){
+  b.style.height = Math.max(x.c/mx*100, x.c > 0 ? 2 : 0.6) + "%";
+  b._tip = String(i).padStart(2,"0") + ":00 · <b>" + money(x.c) + "</b> · " + x.m + " сообщ.";
+}
+
+/* ------------------------------------------------ live-цикл */
+async function tick(force){
   try{
     const r = await fetch("/data?period=" + period);
-    render(await r.json());
+    const d = await r.json();
+    const sig = sigOf(d);
+    render(d, force || sig !== lastSig);
+    lastSig = sig;
     $("livedot").classList.remove("off");
     $("livelbl").textContent = "live";
   }catch(e){
     $("livedot").classList.add("off");
     $("livelbl").textContent = "нет связи";
   }
+  mainEl.classList.remove("dim");
 }
-
-const nav = $("periods");
-for (const [name, idx] of PERIODS){
-  const b = document.createElement("button");
-  b.textContent = name;
-  if (idx === period) b.className = "on";
-  b.onclick = () => {
-    period = idx;
-    for (const x of nav.children) x.className = "";
-    b.className = "on";
-    tick();
-  };
-  nav.appendChild(b);
-}
-tick();
-setInterval(tick, 3000);
+moveThumb();
+addEventListener("load", moveThumb);
+tick(true);
+setInterval(() => tick(false), 3000);
 </script>
 </body>
 </html>
