@@ -1,32 +1,37 @@
-// ccost.app — нативная macOS-обёртка дашборда: запускает встроенный
-// «ccost gui --no-open» (лежит в Resources бандла), ловит URL из stdout
-// и показывает дашборд в WKWebView. Сборка: sh build.sh
+// ccost.app — нативная macOS-обёртка дашборда: запускает встроенный движок
+// «ccost gui --no-open» (бинарь в Resources бандла), ловит URL из stdout
+// и показывает дашборд в WKWebView на всю высоту окна (шапка = тайтлбар).
+// Сборка: sh build.sh (движок задаётся через CCOST_ENGINE)
 import Cocoa
 import WebKit
 
 let BG = NSColor(srgbRed: 0.043, green: 0.055, blue: 0.071, alpha: 1.0)   // #0b0e12
 
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler {
     var window: NSWindow!
     var webView: WKWebView!
     var proc: Process?
 
     func applicationDidFinishLaunching(_ note: Notification) {
         let rect = NSRect(x: 0, y: 0, width: 1240, height: 860)
+        // контент на всю высоту: шапка дашборда и есть тайтлбар (монолит),
+        // светофоры ложатся поверх, перетаскивание — через JS-мост «drag»
         window = NSWindow(contentRect: rect,
-                          styleMask: [.titled, .closable, .miniaturizable, .resizable],
+                          styleMask: [.titled, .closable, .miniaturizable,
+                                      .resizable, .fullSizeContentView],
                           backing: .buffered, defer: false)
         window.title = "ccost"
-        window.titleVisibility = .hidden          // бренд уже есть в дашборде
-        window.titlebarAppearsTransparent = true  // тёмная полоска для перетаскивания
-        window.isMovableByWindowBackground = true
+        window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = true
         window.appearance = NSAppearance(named: .darkAqua)
         window.backgroundColor = BG
         window.minSize = NSSize(width: 720, height: 480)
         window.setFrameAutosaveName("ccost-main")
         window.center()
 
-        webView = WKWebView(frame: rect)
+        let conf = WKWebViewConfiguration()
+        conf.userContentController.add(self, name: "ccost")
+        webView = WKWebView(frame: rect, configuration: conf)
         webView.autoresizingMask = [.width, .height]
         if #available(macOS 12.0, *) { webView.underPageBackgroundColor = BG }
         window.contentView = webView
@@ -35,6 +40,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         showSplash()
         launchServer()
+    }
+
+    func userContentController(_ ucc: WKUserContentController,
+                               didReceive message: WKScriptMessage) {
+        guard message.name == "ccost", let cmd = message.body as? String else { return }
+        switch cmd {
+        case "drag":
+            if let ev = NSApp.currentEvent { window.performDrag(with: ev) }
+        case "zoom":
+            window.performZoom(nil)
+        default:
+            break
+        }
     }
 
     func showSplash() {
@@ -62,9 +80,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let script = Bundle.main.path(forResource: "ccost", ofType: nil) else {
             showError("в бандле нет ccost"); return
         }
+        // Resources/ccost — полноценный бинарь (PyInstaller); в dev-сборке
+        // может лежать скрипт — shebang подхватит python3 сам
         let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        p.arguments = ["python3", script, "gui", "--no-open"]
+        p.executableURL = URL(fileURLWithPath: script)
+        p.arguments = ["gui", "--no-open"]
         let pipe = Pipe()
         p.standardOutput = pipe
         p.standardError = FileHandle.nullDevice

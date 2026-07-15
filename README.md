@@ -36,15 +36,14 @@ Linux x86_64/arm64 и Windows x64. Собираются GitHub Actions на те
 Один и тот же файл работает везде, где есть Claude Code:
 
 - **macOS / Linux / WSL** — из коробки, ничего ставить не нужно.
-- **Windows** — `report`, `json`, `gui` и `app` работают сразу
-  (`python ccost gui` или готовый `ccost-windows-x64.exe` из релизов);
-  для TUI поставь curses-порт: `pip install windows-curses`.
-  Графика TUI по умолчанию ASCII (кодировка консоли непредсказуема);
-  в Windows Terminal можно включить юникодные бары: `set CCOST_UTF8=1`.
-- **`ccost app`** — дашборд отдельным окном без браузерного хрома:
-  на Windows через предустановленный Edge, на Linux — chromium/chrome/brave,
-  на macOS — Chrome (или нативный `ccost.app`, см. ниже). Если ничего
-  не нашлось — откроется обычная вкладка браузера.
+- **Windows** — `ccost-windows-x64.exe` из релизов — полноценная прога:
+  двойной клик открывает своё окно (frameless, рамка и кнопки «— ▢ ✕»
+  рисуются самим дашбордом, WebView2). Консоли нет вообще; для
+  report/json/TUI в терминале — отдельный `ccost-windows-cli.exe`
+  (TUI-графика по умолчанию ASCII, юникод: `set CCOST_UTF8=1`).
+- **`ccost app`** — то же окно из скрипта/CLI-бинарей: pywebview, если
+  установлен (`pip install pywebview`), иначе окно через app-режим
+  Chromium-браузера (Edge/chrome/chromium/brave), иначе вкладка браузера.
 - **Подсчёт токенов одинаков на всех ОС** — движок один. Если Claude Code
   живёт в WSL, а ccost запускаешь из Windows, укажи путь к данным:
   `set CCOST_ROOT=\\wsl.localhost\Ubuntu\home\<user>\.claude\projects`
@@ -102,13 +101,15 @@ Linux x86_64/arm64 и Windows x64. Собираются GitHub Actions на те
 
 ## Приложение macOS (ccost.app)
 
-Тот же дашборд, но как нативное приложение: своё окно с тёмным
-бесшовным тайтлбаром, иконка в доке, Cmd+Q/W/R — без браузера.
-Внутри — WKWebView и встроенный `ccost gui --no-open` (скрипт лежит
-в Resources бандла, при выходе сервер гасится).
+Тот же дашборд, но как нативное приложение: монолитное окно — контент
+на всю высоту, светофоры лежат прямо на шапке дашборда, окно таскается
+за шапку (JS→Swift `performDrag`), двойной клик по шапке — zoom,
+иконка в доке, Cmd+Q/W/R. Внутри — WKWebView и встроенный **бинарный**
+движок `ccost gui --no-open` (PyInstaller, системный python не нужен);
+при выходе сервер гасится.
 
 ```sh
-sh macos/build.sh                          # соберёт macos/dist/ccost.app
+CCOST_ENGINE=/путь/к/бинарю sh macos/build.sh   # или соберётся pyinstaller'ом
 cp -R macos/dist/ccost.app /Applications/
 ```
 

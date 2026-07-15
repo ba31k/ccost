@@ -36,25 +36,39 @@ jobs:
         run: |
           python -m pip install --upgrade pip pyinstaller
           if [ "$RUNNER_OS" = "Windows" ]; then
-            pip install windows-curses   # curses для TUI внутри exe
+            pip install windows-curses pywebview   # TUI + нативное окно в exe
           fi
       - name: Сборка
         shell: bash
         run: |
           cp ccost ccost.py
-          pyinstaller --onefile --name ccost ${{ matrix.arch_flags }} ccost.py
           if [ "$RUNNER_OS" = "Windows" ]; then
+            # полноценная GUI-прога (двойной клик -> окно, без консоли)
+            pyinstaller --onefile --noconsole --collect-all webview \
+              --name ccost ccost.py
             mv dist/ccost.exe "dist/${{ matrix.asset }}"
+            # и отдельный консольный вариант для report/json/TUI
+            pyinstaller --onefile --name ccost-cli ccost.py
+            mv dist/ccost-cli.exe dist/ccost-windows-cli.exe
           else
+            pyinstaller --onefile --name ccost ${{ matrix.arch_flags }} ccost.py
             mv dist/ccost "dist/${{ matrix.asset }}"
           fi
       - name: Смоук-тест
         shell: bash
-        run: ./dist/${{ matrix.asset }} json > /dev/null
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            ./dist/ccost-windows-cli.exe json > /dev/null
+            ./dist/${{ matrix.asset }} --probe
+            grep -q '^ok$' ccost-probe.txt   # pywebview упакован в GUI-exe
+          else
+            ./dist/${{ matrix.asset }} json > /dev/null
+          fi
       - name: ccost.app (macOS, .dmg)
         if: runner.os == 'macOS'
         run: |
-          sh macos/build.sh
+          # движок внутри .app — тот же полноценный бинарь, не скрипт
+          CCOST_ENGINE="$PWD/dist/${{ matrix.asset }}" sh macos/build.sh
           mkdir -p dmgroot
           cp -R macos/dist/ccost.app dmgroot/
           ln -s /Applications dmgroot/Applications
@@ -69,6 +83,12 @@ jobs:
         with:
           name: ccost-macos-dmg
           path: dist/ccost-macos.dmg
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'Windows'
+        with:
+          name: ccost-windows-cli
+          path: dist/ccost-windows-cli.exe
           if-no-files-found: error
 
   release:
@@ -91,10 +111,11 @@ jobs:
             | файл | система |
             |---|---|
             | `ccost-macos.dmg` | macOS-приложение (окно с live-дашбордом) |
+            | `ccost-windows-x64.exe` | Windows-приложение: двойной клик — своё окно |
+            | `ccost-windows-cli.exe` | Windows CLI (report/json/TUI в терминале) |
             | `ccost-macos-universal2` | macOS CLI (Apple Silicon + Intel) |
             | `ccost-linux-x86_64` | Linux x86_64 |
             | `ccost-linux-arm64` | Linux arm64 |
-            | `ccost-windows-x64.exe` | Windows x64 (`.exe app` — окно-приложение) |
 
             **macOS (.dmg)**: открыть, перетащить ccost в Applications; бинарь не
             подписан — при блокировке: `xattr -dr com.apple.quarantine /Applications/ccost.app`.

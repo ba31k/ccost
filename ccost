@@ -862,6 +862,18 @@ body.day-mode .cards{display:none}
   box-shadow:0 6px 24px rgba(0,0,0,.5)}
 #tip b{color:var(--money)}
 footer{color:var(--dim); font:11px var(--mono); text-align:center; padding:4px 0 26px}
+/* своя рамка окна: шапка = тайтлбар */
+body.chrome-mac header{padding-left:86px; padding-top:20px;
+  -webkit-user-select:none; cursor:default}
+body.chrome-win header{padding-top:12px; -webkit-user-select:none}
+body.chrome-win header > :not(#dragstrip){position:relative; z-index:1}
+body.chrome-win nav{margin-left:auto}
+#dragstrip{position:absolute; inset:0; z-index:0}
+#winctl{display:flex; gap:2px; margin-left:8px}
+#winctl button{appearance:none; border:0; background:transparent; color:var(--dim);
+  width:36px; height:27px; border-radius:6px; font:13px var(--mono); cursor:pointer}
+#winctl button:hover{background:#1a222c; color:var(--ink)}
+#winctl button.x:hover{background:#b93a2e; color:#fff}
 @media (prefers-reduced-motion:reduce){
   *{animation:none!important; transition:none!important}
 }
@@ -1338,6 +1350,42 @@ async function tick(force){
   }
   mainEl.classList.remove("dim");
 }
+/* --------------------------------------- своя рамка окна (mac / windows) */
+(function chrome(){
+  const header = document.querySelector("header");
+  const wk = window.webkit && window.webkit.messageHandlers
+          && window.webkit.messageHandlers.ccost;
+  if (wk){                                    // ccost.app: drag через performDrag
+    document.body.classList.add("chrome-mac");
+    header.addEventListener("mousedown", e => {
+      if (e.target.closest("button, nav, a")) return;
+      wk.postMessage("drag");
+    });
+    header.addEventListener("dblclick", e => {
+      if (e.target.closest("button, nav, a")) return;
+      wk.postMessage("zoom");
+    });
+  }
+  addEventListener("pywebviewready", () => {  // Windows: frameless + свои кнопки
+    document.body.classList.add("chrome-win");
+    const strip = document.createElement("div");
+    strip.className = "pywebview-drag-region";
+    strip.id = "dragstrip";
+    strip.addEventListener("dblclick", () => window.pywebview.api.toggle_max());
+    header.prepend(strip);
+    const ctl = document.createElement("div");
+    ctl.id = "winctl";
+    for (const [glyph, fn, cls] of [["–","minimize",""],["▢","toggle_max",""],["✕","close","x"]]){
+      const b = document.createElement("button");
+      b.textContent = glyph;
+      if (cls) b.className = cls;
+      b.onclick = () => window.pywebview.api[fn]();
+      ctl.appendChild(b);
+    }
+    header.appendChild(ctl);
+    moveThumb();
+  });
+})();
 moveThumb();
 addEventListener("load", moveThumb);
 tick(true);
@@ -1380,11 +1428,11 @@ def find_app_browser():
     return None
 
 
-def serve_gui(co, port=0, open_browser=True, app_browser=None):
+def _gui_server(co, port=0):
+    """Собирает HTTP-сервер дашборда (не запускает serve_forever)."""
     from http.server import BaseHTTPRequestHandler, HTTPServer
     from urllib.parse import urlparse, parse_qs
     import threading
-    import webbrowser
 
     # первый скан — в фоне: окно открывается сразу и показывает прогресс
     lock = threading.Lock()
@@ -1444,6 +1492,14 @@ def serve_gui(co, port=0, open_browser=True, app_browser=None):
 
     srv = HTTPServer(("127.0.0.1", port), H)
     url = f"http://127.0.0.1:{srv.server_address[1]}/"
+    return srv, url
+
+
+def serve_gui(co, port=0, open_browser=True, app_browser=None):
+    import threading
+    import webbrowser
+
+    srv, url = _gui_server(co, port)
     # flush обязателен: ccost.app читает URL из пайпа
     print(f"ccost gui: {url}  (Ctrl-C — выход)", flush=True)
     if app_browser:
@@ -1468,6 +1524,45 @@ def serve_gui(co, port=0, open_browser=True, app_browser=None):
         srv.serve_forever()
     except KeyboardInterrupt:
         pass
+
+
+def native_window(co, port=0):
+    """Нативное окно через pywebview (в Windows-бинарник он вшит):
+    на Windows — frameless, рамку и кнопки «— ▢ ✕» рисует сам дашборд.
+    False — pywebview недоступен, зовущий уходит на запасной вариант."""
+    try:
+        import webview
+    except ImportError:
+        return False
+    import threading
+
+    srv, url = _gui_server(co, port)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    state = {"max": False}
+
+    class Api:
+        def minimize(self):
+            win.minimize()
+
+        def toggle_max(self):
+            try:
+                if state["max"]:
+                    win.restore()
+                else:
+                    win.maximize()
+                state["max"] = not state["max"]
+            except Exception:
+                win.toggle_fullscreen()
+
+        def close(self):
+            win.destroy()
+
+    win = webview.create_window(
+        "ccost", url, js_api=Api(), width=1240, height=860,
+        min_size=(760, 520), frameless=(os.name == "nt"),
+        easy_drag=False, background_color="#0b0e12")
+    webview.start()
+    return True
 
 
 # ---------------------------------------------------------------- TUI (curses)
@@ -2076,6 +2171,15 @@ def _dodge_broken_rep():
 
 def main():
     arg = sys.argv[1] if len(sys.argv) > 1 else ""
+    if arg == "--probe":                # CI: проверить, что webview упакован
+        try:
+            import webview              # noqa: F401
+            msg = "ok"
+        except Exception as e:
+            msg = "fail: %r" % (e,)
+        with open("ccost-probe.txt", "w") as fh:
+            fh.write(msg)
+        return
     setup_output()
     co = Collector()
     if arg in ("gui", "web", "-g"):     # скан пойдёт в фоне — окно сразу
@@ -2083,10 +2187,14 @@ def main():
         port = next((int(a) for a in rest if a.isdigit()), 0)
         serve_gui(co, port, open_browser="--no-open" not in rest)
         return
-    if arg == "app":                    # окно-приложение (Windows/Linux/mac)
+    # окно-приложение; на Windows-бинарнике это же — режим по умолчанию
+    if arg == "app" or (arg == "" and os.name == "nt"
+                        and getattr(sys, "frozen", False)):
         rest = sys.argv[2:]
         port = next((int(a) for a in rest if a.isdigit()), 0)
-        b = find_app_browser()
+        if native_window(co, port):     # pywebview: своя рамка
+            return
+        b = find_app_browser()          # fallback: chromium --app
         if not b:
             print("не нашёл Chrome/Chromium/Edge — открываю вкладку браузера",
                   flush=True)
@@ -2097,7 +2205,7 @@ def main():
         print_json(co)
         return
     want_text = arg in ("report", "-r", "--report", "text")
-    if want_text or not sys.stdout.isatty():
+    if want_text or not (sys.stdout and sys.stdout.isatty()):
         print_text(co)
         return
     if curses is None:
