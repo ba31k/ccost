@@ -1089,11 +1089,11 @@ def gui_payload(co, period, day=None):
          "model": top_model(a).replace("claude-", ""),
          "cost": round(a["cost"], 2), "msgs": a["msgs"], "tok": tok(a)}
         for k, a in sorted(aggregate(f, lambda r: r.session).items(),
-                           key=lambda kv: -kv[1]["cost"])[:14]
+                           key=lambda kv: -kv[1]["cost"])[:10]
     ]
     tools = [
         {"name": k, "calls": a["calls"], "msgs": a["msgs"], "cost": round(a["cost"], 2)}
-        for k, a in sorted(tools_agg(f).items(), key=lambda kv: -kv[1]["calls"])[:12]
+        for k, a in sorted(tools_agg(f).items(), key=lambda kv: -kv[1]["calls"])[:10]
     ]
     hours_agg = aggregate([r for r in f if r.hour >= 0], lambda r: r.hour)
     hours = [{"c": round(hours_agg[hh]["cost"], 2) if hh in hours_agg else 0,
