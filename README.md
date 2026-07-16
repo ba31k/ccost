@@ -8,6 +8,8 @@ The engine is a single dependency-free Python file. The rest is not Python:
 the dashboard is plain HTML/CSS/JS (`gui/`), the macOS app is Swift +
 WKWebView (`macos/`), the Windows window uses WebView2.
 
+![live dashboard](shots/dashboard.png)
+
 ## Layout
 
 | path | language | purpose |
@@ -45,6 +47,8 @@ forecast, cache savings, average day), daily bar chart with day drill-down
 models, top chats, tools, hours of day, a GitHub-style year calendar, and
 all-time records (priciest hour/day/chat, longest chat, best streak…).
 
+![year calendar and records](shots/records.png)
+
 Settings (gear icon):
 
 - **sources** — Claude Code and Codex toggles, with paths and counts;
@@ -52,6 +56,8 @@ Settings (gear icon):
 - **default period**, **menu bar counter** (mac), **update checks**;
 - **prices** — edit any model's rates in place; the whole history is
   repriced instantly. Stored in `~/.ccost.json`.
+
+![settings](shots/settings.png)
 
 Data paths can be overridden via `claude_root`/`codex_root` in the config
 or the `CCOST_ROOT`/`CCOST_CODEX_ROOT` environment variables.
@@ -63,6 +69,10 @@ the titlebar, drag it to move, double-click to zoom), Dock icon, Cmd+Q/W/R,
 and an optional menu bar counter showing today's spend (the window can be
 closed while the counter keeps running). The bundled engine is a PyInstaller
 binary — no system Python required.
+
+![macOS app with the menu bar counter](shots/desktop.png)
+
+<img src="shots/menubar.png" width="284" alt="menu bar counter">
 
 ```sh
 CCOST_ENGINE=/path/to/binary sh macos/build.sh   # or let it run pyinstaller
