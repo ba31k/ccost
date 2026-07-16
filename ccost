@@ -73,7 +73,7 @@ TS_FORMATS = ("%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ")
 # ---------------------------------------------------------------- config
 
 CONFIG_PATH = os.path.expanduser("~/.ccost.json")
-VERSION = "1.4.0"
+VERSION = "1.4.2"
 
 DEFAULT_CFG = {"sources": {"claude": True, "codex": True},
                "claude_root": None, "codex_root": None,

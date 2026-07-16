@@ -54,6 +54,13 @@ jobs:
             pyinstaller --onefile --name ccost ${{ matrix.arch_flags }} ccost.py
             mv dist/ccost "dist/${{ matrix.asset }}"
           fi
+      - name: Version matches tag
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          v=$(grep -m1 '^VERSION = ' ccost | cut -d'"' -f2)
+          [ "v$v" = "$GITHUB_REF_NAME" ] || {
+            echo "VERSION $v != tag $GITHUB_REF_NAME"; exit 1; }
       - name: Smoke test
         shell: bash
         run: |
