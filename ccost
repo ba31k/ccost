@@ -1936,16 +1936,16 @@ function renderModels(d, fresh){
                     '<div class="tok"></div><div class="cost"></div>';
       r.children[0].textContent = m.name;
       stag(r, i, 40);
-      (i < 5 ? box : more).appendChild(r);   // top 5 visible, rest collapsible
+      (i < 3 ? box : more).appendChild(r);   // top 3 visible, rest collapsible
       R.models.push(r);
     });
-    if (d.models.length > 5){
+    if (d.models.length > 3){
       box.appendChild(more);
       const btn = document.createElement("button");
       btn.className = "morebtn";
       const label = () => modelsOpen
         ? "− collapse"
-        : "+ " + (d.models.length - 5) + " more models";
+        : "+ " + (d.models.length - 3) + " more models";
       btn.textContent = label();
       btn.onclick = () => {
         modelsOpen = !modelsOpen;
