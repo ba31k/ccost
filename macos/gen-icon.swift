@@ -1,6 +1,6 @@
-// Рисует иконку ccost (тёмная скруглённая плашка + бирюзовые бары
-// с фосфорным свечением) и складывает .iconset для iconutil.
-// Запуск: swift gen-icon.swift <outdir>
+// Draws the ccost icon (dark rounded plate + teal bars with a phosphor
+// glow) and writes an .iconset for iconutil.
+// Usage: swift gen-icon.swift <outdir>
 import AppKit
 
 let outDir = CommandLine.arguments.count > 1 ? CommandLine.arguments[1] : "ccost.iconset"
@@ -14,7 +14,7 @@ func render(_ px: Int, _ name: String) {
     NSGraphicsContext.saveGraphicsState()
     NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
     let s = CGFloat(px)
-    let inset = s * 0.09                       // системный отступ маковских иконок
+    let inset = s * 0.09                       // standard macOS icon inset
     let rect = NSRect(x: inset, y: inset, width: s - inset * 2, height: s - inset * 2)
     let plate = NSBezierPath(roundedRect: rect, xRadius: s * 0.185, yRadius: s * 0.185)
     NSGradient(colors: [
@@ -52,4 +52,4 @@ for (px, name) in [
     (256, "icon_256x256.png"), (512, "icon_256x256@2x.png"),
     (512, "icon_512x512.png"), (1024, "icon_512x512@2x.png"),
 ] { render(px, name) }
-print("иконки: \(outDir)")
+print("icons: \(outDir)")

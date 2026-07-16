@@ -10,7 +10,7 @@ body{
   background:var(--bg); color:var(--ink); font-family:var(--sans);
   font-size:14px; line-height:1.45; min-height:100vh;
 }
-body::before{ /* фосфорные сканлайны, едва заметные */
+body::before{ /* faint phosphor scanlines */
   content:""; position:fixed; inset:0; pointer-events:none; z-index:0;
   background:
     radial-gradient(900px 340px at 24% -60px, rgba(45,212,200,.055), transparent 70%),
@@ -89,7 +89,7 @@ main.dim{opacity:.45}
 .panel h2{margin-bottom:14px}
 .cols{display:grid; grid-template-columns:1fr 1fr; gap:16px}
 @media (max-width:880px){.cols{grid-template-columns:1fr}}
-/* график по дням */
+/* daily bar chart */
 .chart{position:relative; height:210px}
 .gridline{position:absolute; left:0; right:0; border-top:1px solid var(--line)}
 .gridline span{position:absolute; right:0; top:-16px; color:var(--dim);
@@ -108,7 +108,7 @@ body.day-mode .cards{display:none}
 .bars .b:hover{filter:brightness(1.3)}
 .axis{display:flex; justify-content:space-between; color:var(--dim);
   font:10.5px var(--mono); margin-top:6px}
-/* хитмап */
+/* heatmap */
 .heatwrap{display:grid; grid-template-columns:26px 1fr; gap:6px; align-items:start}
 .heatdays{display:grid; grid-template-rows:repeat(7,16px); gap:3px;
   color:var(--dim); font:10.5px var(--mono); line-height:16px}
@@ -130,7 +130,7 @@ body.day-mode .cards{display:none}
 .axis.axis24 span:nth-child(3){grid-column:13}
 .axis.axis24 span:nth-child(4){grid-column:19}
 .axis.axis24 span:nth-child(5){grid-column:24; justify-self:end}
-/* строки-списки */
+/* list rows */
 @keyframes rowin{from{opacity:0; transform:translateY(6px)} to{opacity:1; transform:none}}
 .rows{display:flex; flex-direction:column}
 .row{display:grid; grid-template-columns:minmax(0,1fr) auto; gap:4px 14px;
@@ -164,11 +164,11 @@ body.day-mode .cards{display:none}
   box-shadow:0 6px 24px rgba(0,0,0,.5)}
 #tip b{color:var(--money)}
 footer{color:var(--dim); font:11px var(--mono); text-align:center; padding:4px 0 26px}
-/* своя рамка окна: шапка = тайтлбар */
+/* custom window chrome: header acts as the titlebar */
 body.chrome-mac header{padding:13px 28px 8px 92px; min-height:52px;
   -webkit-user-select:none; cursor:default}
-body.chrome-mac .hright{align-self:center}   /* на линии светофоров */
-body.chrome-mac .brand{display:none}         /* окно само себя подписывает */
+body.chrome-mac .hright{align-self:center}   /* aligned with traffic lights */
+body.chrome-mac .brand{display:none}         /* the window labels itself */
 body.chrome-mac header{justify-content:flex-end}
 #conn{font:11px var(--mono); color:#e0b072; border:1px solid #4a3620;
   background:#1c1610; padding:3px 8px; border-radius:6px; align-self:center}
@@ -185,10 +185,10 @@ body.chrome-win nav{margin-left:auto}
   width:44px; height:30px; border-radius:0; font:12px var(--mono); cursor:pointer}
 #winctl button:hover{background:#1d2733; color:var(--ink)}
 #winctl button.x:hover{background:#c42b1c; color:#fff}
-/* скроллбары скрыты полностью — прокрутка колесом/трекпадом работает */
+/* scrollbars fully hidden — wheel/trackpad scrolling still works */
 ::-webkit-scrollbar{display:none; width:0; height:0}
 html{scrollbar-width:none; -ms-overflow-style:none}
-/* пустое состояние: данных нет вообще или за период */
+/* empty state: no data at all, or none for the period */
 body.nodata .cards, body.nodata .cols, body.nodata main > .panel{display:none}
 #emptybox{border:1px dashed #2a3440; border-radius:10px; padding:38px 26px;
   text-align:center}
@@ -199,13 +199,13 @@ body.nodata .cards, body.nodata .cols, body.nodata main > .panel{display:none}
   *{animation:none!important; transition:none!important}
 }
 
-/* правый блок шапки: периоды + шестерёнка */
+/* header right block: periods + gear */
 .hright{display:flex; align-items:center; gap:12px}
 #gear{appearance:none; border:0; background:transparent; color:var(--dim);
   width:28px; height:28px; display:flex; align-items:center; justify-content:center;
   border-radius:6px; cursor:pointer; transition:color .2s, transform .35s}
 #gear:hover{color:var(--ink); transform:rotate(45deg)}
-/* панель настроек */
+/* settings drawer */
 #shade{position:fixed; inset:0; background:rgba(4,6,8,.55); z-index:19}
 #drawer{position:fixed; top:0; right:0; bottom:0; width:340px; z-index:20;
   background:var(--panel); border-left:1px solid var(--line);
@@ -238,11 +238,11 @@ body.chrome-win #drawer{top:30px}
 .pricetbl .ph{color:var(--amber); font:600 10px var(--sans);
   text-transform:uppercase; letter-spacing:.1em}
 
-/* баннер обновления */
+/* update banner */
 #upd{font:700 11px var(--mono); color:#0b0e12; background:var(--amber);
   border-radius:6px; padding:3px 9px; text-decoration:none; align-self:center}
 #upd:hover{filter:brightness(1.12)}
-/* годовой календарь */
+/* year calendar */
 #yearwrap{overflow-x:auto; padding-bottom:4px}
 #yearmonths{position:relative; height:14px; font:10px var(--mono); color:var(--dim)}
 #yearmonths span{position:absolute; top:0}
@@ -252,7 +252,7 @@ body.chrome-win #drawer{top:30px}
   transition:background .5s ease}
 #year i.has{cursor:pointer}
 #year i.has:hover{outline:1px solid var(--teal)}
-/* рекорды */
+/* records */
 #recs{display:grid; grid-template-columns:repeat(auto-fit,minmax(205px,1fr)); gap:12px}
 .rec{border:1px solid var(--line); border-radius:8px; padding:11px 13px;
   background:var(--panel2)}
@@ -262,7 +262,7 @@ body.chrome-win #drawer{top:30px}
   font-variant-numeric:tabular-nums}
 .rec .rs{color:var(--dim); font:11px var(--mono); margin-top:3px;
   white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
-/* редактируемые цены */
+/* editable prices */
 .pricetbl input{width:70px; appearance:none; border:1px solid var(--line);
   background:var(--panel2); color:var(--ink); font:11.5px var(--mono);
   border-radius:5px; padding:3px 6px; text-align:right}

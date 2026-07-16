@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Встраивает исходники дашборда (gui/index.html + style.css + app.js)
-в GUI_HTML внутри файла ccost — дистрибуция остаётся одним файлом.
+"""Inlines the dashboard sources (gui/index.html + style.css + app.js) into
+the GUI_HTML block inside ccost, keeping the distribution a single file.
 
-Правишь дашборд в gui/ -> python3 tools/embed.py -> коммитишь оба."""
+Edit the dashboard in gui/ -> python3 tools/embed.py -> commit both."""
 import pathlib
 import re
 
@@ -15,14 +15,14 @@ html = html.replace('<link rel="stylesheet" href="style.css">',
                     "<style>\n" + css + "</style>")
 html = html.replace('<script src="app.js"></script>',
                     "<script>\n" + js + "</script>")
-assert "style.css" not in html and "app.js" not in html, "маркеры не заменились"
-assert '"""' not in html, "тройные кавычки сломают встраивание"
+assert "style.css" not in html and "app.js" not in html, "markers not replaced"
+assert '"""' not in html, "triple quotes would break embedding"
 
 ccost = root / "ccost"
 src = ccost.read_text()
 new, n = re.subn(r'GUI_HTML = r""".*?"""',
                  lambda m: 'GUI_HTML = r"""' + html + '"""',
                  src, count=1, flags=re.S)
-assert n == 1, "блок GUI_HTML не найден"
+assert n == 1, "GUI_HTML block not found"
 ccost.write_text(new)
-print(f"встроено: {len(css)} css + {len(js)} js -> ccost")
+print(f"embedded: {len(css)} css + {len(js)} js -> ccost")

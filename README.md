@@ -1,211 +1,127 @@
 # ccost
 
-Статистика токенов и денег (по прайсу API) по всем локальным сессиям
-**Claude Code и Codex (OpenAI)**: интерактивный TUI в терминале,
-live-дашборд в браузере и нативные приложения для macOS и Windows.
+Token and cost statistics for local **Claude Code** and **Codex (OpenAI)**
+sessions, priced at API list rates. Ships as a terminal TUI, a live browser
+dashboard, and native apps for macOS and Windows.
 
-Движок — один файл на чистом Python 3 без зависимостей, но проект не
-«фулл питон»: дашборд — это HTML/CSS/JS (`gui/`), маковское приложение —
-Swift + WKWebView (`macos/`), виндовое окно — WebView2. Читает
-`~/.claude/projects/**/*.jsonl` (Claude Code) и `~/.codex/sessions/**/*.jsonl`
-(Codex CLI) и считает стоимость по прайсам Anthropic и OpenAI API.
+The engine is a single dependency-free Python file. The rest is not Python:
+the dashboard is plain HTML/CSS/JS (`gui/`), the macOS app is Swift +
+WKWebView (`macos/`), the Windows window uses WebView2.
 
-## Настройки
+## Layout
 
-Шестерёнка в шапке дашборда открывает панель настроек:
-
-- **источники** — Claude Code и Codex включаются тумблерами (с путями
-  и счётчиками найденного); всё вместе или по отдельности;
-- **обновление** — интервал live-поллинга (2/5/10 с);
-- **период при старте**;
-- **приложение** — счётчик в menu bar (мак) и автопроверка обновлений;
-- **прайс** — цены редактируются прямо в таблице (свои тарифы, скидки,
-  прокси): пересчёт всей истории мгновенный, «сбросить» возвращает прайс.
-
-Хранится в `~/.ccost.json`; пути к данным переопределяются там же
-(`claude_root`/`codex_root`) или переменными `CCOST_ROOT`/`CCOST_CODEX_ROOT`.
-
-## Из чего собрано
-
-| путь | язык | что это |
+| path | language | purpose |
 |---|---|---|
-| `ccost` | Python | движок: парсер JSONL, цены, TUI (curses), HTTP-сервер дашборда; дистрибутивно — один самодостаточный файл |
-| `gui/` | HTML/CSS/JS | исходники live-дашборда (фосфорная тема, графики, хитмап, live-тики) |
-| `tools/embed.py` | Python | встраивает `gui/` внутрь `ccost`, чтобы дистрибуция оставалась одним файлом |
-| `macos/` | Swift | нативное ccost.app: окно-монолит, drag через performDrag, генератор иконки |
-| `.github/workflows/` | YAML | сборка релизных бинарей под все ОС (PyInstaller + swiftc + dmg) |
+| `ccost` | Python | engine: JSONL parsers, pricing, TUI (curses), dashboard HTTP server; distributed as one self-contained file |
+| `gui/` | HTML/CSS/JS | dashboard sources |
+| `tools/embed.py` | Python | inlines `gui/` into `ccost` so distribution stays a single file |
+| `macos/` | Swift | native ccost.app: seamless window, menu bar counter, icon generator |
+| `.github/workflows/` | YAML | release binaries for every OS (PyInstaller + swiftc + dmg) |
 
-Правишь дашборд в `gui/` → `python3 tools/embed.py` → коммитишь оба.
+Edit the dashboard in `gui/`, run `python3 tools/embed.py`, commit both.
 
-## Запуск
+## Usage
 
 ```sh
-./ccost              # интерактивный TUI (live-режим: цифры растут сами)
-./ccost gui          # live-дашборд в браузере (см. ниже)
-./ccost app          # то же, но отдельным окном-приложением (Win/Linux/mac)
-./ccost report       # полный текстовый отчёт (он же фолбэк для пайпа / не-tty)
-./ccost -r           # то же, что report
-./ccost json         # агрегаты в JSON — для jq / скриптов
+./ccost              # interactive TUI (live: numbers grow as agents work)
+./ccost gui          # live dashboard in the browser
+./ccost app          # same dashboard in a native window (Win/Linux/mac)
+./ccost report       # full text report (also the pipe/non-tty fallback)
+./ccost json         # aggregates as JSON, for scripts
 ```
 
-или положить в `PATH`:
+Prebuilt binaries (no Python needed) are in
+[releases](../../releases): `ccost-macos.dmg` (app), macOS universal2 /
+Linux x86_64 / Linux arm64 / Windows CLI binaries, and
+`ccost-windows-x64.exe` — a windowed app, double-click to run.
+
+## Dashboard
+
+Local server on 127.0.0.1, everything inline (no CDNs, works offline).
+Live updates every few seconds via the incremental parser. Sections:
+cost counter with live "+$" ticks, stat cards (today + last hour, month
+forecast, cache savings, average day), daily bar chart with day drill-down
+(click a bar, ←/→ to page days, Esc to reset), week × hours heatmap,
+models, top chats, tools, hours of day, a GitHub-style year calendar, and
+all-time records (priciest hour/day/chat, longest chat, best streak…).
+
+Settings (gear icon):
+
+- **sources** — Claude Code and Codex toggles, with paths and counts;
+- **refresh** — polling interval (2/5/10 s);
+- **default period**, **menu bar counter** (mac), **update checks**;
+- **prices** — edit any model's rates in place; the whole history is
+  repriced instantly. Stored in `~/.ccost.json`.
+
+Data paths can be overridden via `claude_root`/`codex_root` in the config
+or the `CCOST_ROOT`/`CCOST_CODEX_ROOT` environment variables.
+
+## macOS app
+
+`ccost.app` is a native shell: full-height window (the dashboard header is
+the titlebar, drag it to move, double-click to zoom), Dock icon, Cmd+Q/W/R,
+and an optional menu bar counter showing today's spend (the window can be
+closed while the counter keeps running). The bundled engine is a PyInstaller
+binary — no system Python required.
 
 ```sh
-cp ccost ~/bin/      # если ~/bin в PATH
-ccost
-```
-
-## Готовые бинарники
-
-В [релизах](../../releases) лежат standalone-сборки (Python не нужен):
-`ccost-macos.dmg` (приложение), CLI-бинарники macOS universal2,
-Linux x86_64/arm64 и Windows x64. Собираются GitHub Actions на тег `v*`
-(`.github/workflows/release.yml`).
-
-## Платформы
-
-Один и тот же файл работает везде, где есть Claude Code:
-
-- **macOS / Linux / WSL** — из коробки, ничего ставить не нужно.
-- **Windows** — `ccost-windows-x64.exe` из релизов — полноценная прога:
-  двойной клик открывает своё окно (frameless, рамка и кнопки «— ▢ ✕»
-  рисуются самим дашбордом, WebView2). Консоли нет вообще; для
-  report/json/TUI в терминале — отдельный `ccost-windows-cli.exe`
-  (TUI-графика по умолчанию ASCII, юникод: `set CCOST_UTF8=1`).
-- **`ccost app`** — то же окно из скрипта/CLI-бинарей: pywebview, если
-  установлен (`pip install pywebview`), иначе окно через app-режим
-  Chromium-браузера (Edge/chrome/chromium/brave), иначе вкладка браузера.
-- **Подсчёт токенов одинаков на всех ОС** — движок один. Если Claude Code
-  живёт в WSL, а ccost запускаешь из Windows, укажи путь к данным:
-  `set CCOST_ROOT=\\wsl.localhost\Ubuntu\home\<user>\.claude\projects`
-  (или просто гоняй линукс-бинарь внутри WSL).
-
-## TUI
-
-Вкладки: **Обзор · Модели · Дни · Чаты · Проекты · Тулзы · Часы · Неделя**.
-
-**Live-режим**: каждые ~2 секунды инкрементально дочитываются только дописанные
-байты JSONL (≈5 мс на тик) — цифры растут прямо во время работы Claude Code.
-Мышь тоже работает: клик по вкладке, клик по строке — выбор, второй клик или
-двойной — карточка, колесо — скролл.
-
-Управление:
-
-| клавиша | действие |
-|---|---|
-| `←` `→` / `1`–`8` / `Tab` / клик | переключение вкладок |
-| `↑` `↓` / `j` `k` / `PgUp` `PgDn` / `g` `G` / колесо | скролл / в начало / в конец |
-| `Enter` / второй клик | карточка выбранной строки |
-| `f` / `F` | период: всё → сегодня → 7 дней → 30 дней → месяц |
-| `s` | сортировка: по стоимости ↔ по токенам/вызовам |
-| `p` | пауза/продолжение live-обновления |
-| `r` | перечитать всё с нуля |
-| `q` / `Esc` | выход (Esc также закрывает карточку) |
-
-- **Обзор** — общий итог, ключевые метрики: сегодня и за последний час,
-  прогноз на месяц, стрик активных дней, пик дня/часа, доля кэша и
-  **сколько кэш сэкономил денег**, спарклайн стоимости по дням
-  (дни без активности показываются как нули, ось времени не врёт).
-- **Чаты** — топ разговоров по стоимости, с заголовком (первое сообщение) и моделью.
-  Usage сабагентов сворачивается в родительский чат.
-- **Тулзы** — счётчик вызовов инструментов (Bash, Read, Edit, mcp__…) с
-  дедупликацией по id вызова; `$≈` — стоимость сообщений, поделённая между
-  вызовами (приблизительная атрибуция).
-- **Дни / Часы** — распределение во времени с барами.
-- **Неделя** — тепловая карта день-недели × час: когда именно горят токены.
-- **Enter** на строке — карточка: полное название, длительность, разбивка
-  токенов, топ-модели (для чата) или топ-чаты (для остальных).
-
-## GUI (браузер)
-
-`ccost gui` поднимает локальный сервер (только 127.0.0.1) и открывает вкладку
-с live-дашбордом в той же «фосфорной» эстетике, что и TUI: герой-счётчик трат
-с плавным перекатом цифр, карточки (сегодня + за час, прогноз на месяц,
-экономия кэша, средний день), график по дням с тултипами, тепловая карта
-неделя × часы, модели, топ-чаты и инструменты. Обновляется каждые 3 секунды
-тем же инкрементальным парсером — видно, как деньги горят в реальном времени.
-
-- `ccost gui 8765` — зафиксировать порт (по умолчанию — случайный свободный);
-- `ccost gui --no-open` — не открывать браузер (для обёрток);
-- всё inline, ни одного CDN — работает полностью офлайн;
-- остановить: `Ctrl-C` в терминале, где запущен.
-
-## Приложение macOS (ccost.app)
-
-Тот же дашборд, но как нативное приложение: монолитное окно — контент
-на всю высоту, светофоры лежат прямо на шапке дашборда, окно таскается
-за шапку (JS→Swift `performDrag`), двойной клик по шапке — zoom,
-иконка в доке, Cmd+Q/W/R. Внутри — WKWebView и встроенный **бинарный**
-движок `ccost gui --no-open` (PyInstaller, системный python не нужен);
-при выходе сервер гасится.
-
-```sh
-CCOST_ENGINE=/путь/к/бинарю sh macos/build.sh   # или соберётся pyinstaller'ом
+CCOST_ENGINE=/path/to/binary sh macos/build.sh   # or let it run pyinstaller
 cp -R macos/dist/ccost.app /Applications/
 ```
 
-Готовый `ccost-macos.dmg` есть в релизах: открыть, перетащить в
-Applications (не подписан — при блокировке Гейткипером:
-`xattr -dr com.apple.quarantine /Applications/ccost.app`).
+## Windows
 
-## Дашборд: что внутри
+`ccost-windows-x64.exe` is a real app: double-click opens a frameless
+window (the dashboard draws its own titlebar and — ▢ ✕ buttons, WebView2).
+For terminal use there is `ccost-windows-cli.exe` (TUI glyphs default to
+ASCII; set `CCOST_UTF8=1` in Windows Terminal for unicode bars). If Claude
+Code lives in WSL, point the exe at it:
+`set CCOST_ROOT=\\wsl.localhost\Ubuntu\home\<user>\.claude\projects`.
 
-Помимо основных секций — **годовой календарь** (à la GitHub contributions,
-клик по дню — детализация), панель **рекордов** (самый дорогой час/день/чат,
-самый долгий чат, рекорд токенов, лучший стрик, любимый инструмент)
-и баннер «вышла новая версия» (проверка релизов GitHub раз в 6 часов,
-отключается в настройках).
+## TUI
 
-## Быстрый старт: снапшот состояния
+Tabs: **Overview · Models · Days · Chats · Projects · Tools · Hours · Week**.
+Mouse works: click tabs and rows, wheel scrolls, second click opens details.
 
-Полный парс JSONL (гигабайты) происходит только один раз: разобранное
-состояние сохраняется в `~/.cache/ccost/state.pickle` (раз в ~5 минут
-при изменениях), и следующий запуск поднимается за долю секунды —
-инкрементальный парсер дочитывает только новые байты. Холодный парс
-(первый запуск, сотни мегабайт) идёт параллельно в несколько процессов
-(~2.5 с вместо 6.5 с); цены в снапшот не входят — пересчитываются при
-загрузке, поэтому смена прайса не требует повторного парса.
+| key | action |
+|---|---|
+| `←` `→` / `1`–`8` / `Tab` | switch tabs |
+| `↑` `↓` / `j` `k` / `PgUp` `PgDn` / `g` `G` | scroll |
+| `Enter` | details card for the selected row |
+| `f` / `F` | period: all → today → 7 days → 30 days → month |
+| `s` | sort by cost ↔ tokens/calls |
+| `p` | pause/resume live updates |
+| `r` | re-read everything |
+| `q` / `Esc` | quit (Esc also closes the card) |
 
-## Как считает
+## How it counts
 
-- **цены** — стандартный прайс API ($/1M токенов): Anthropic (`PRICE`)
-  и OpenAI (`PRICE_OPENAI`, вкл. cached input по своей цене); id моделей
-  матчатся по длиннейшему префиксу, модели без прайса считаются по $0
-  и явно перечисляются в отчёте;
-- **Codex** — usage берётся из событий `token_count` rollout-файлов
-  (`last_token_usage`: input/cached/output+reasoning), модель и проект —
-  из `turn_context`/`session_meta`, дубли resume отсекаются;
-- **кэш** — запись в 5-мин ephemeral ×1.25, запись в 1-час ephemeral ×2
-  (разделяются по `usage.cache_creation`), чтение ×0.1 от input-цены;
-- **дедупликация** — стриминг пишет несколько JSONL-строк на одно сообщение
-  с растущим usage; по каждому `message.id` берётся пофилдовый максимум
-  (первая строка занижает output, а resume/fork сессий удваивают цифры);
-- `cache` в таблицах — это `cache_write + cache_read` вместе.
+- **prices** — API list rates ($/1M tokens) for Anthropic (`PRICE`) and
+  OpenAI (`PRICE_OPENAI`, cached input priced separately); model ids match
+  by longest prefix; unpriced models count as $0 and are listed explicitly;
+- **cache** — Anthropic 5-minute writes ×1.25, 1-hour writes ×2 (split via
+  `usage.cache_creation`), reads ×0.1 of the input rate;
+- **dedup** — streaming writes several JSONL lines per message with growing
+  usage; the field-wise maximum per `message.id` is kept (the first line
+  undercounts output, and resumed/forked sessions would double-count);
+- **Codex** — usage comes from `token_count` events in rollout files, model
+  and project from `turn_context`/`session_meta`, resume duplicates dropped.
 
-> Это цена **по прайсу API**, а не то, что реально заплачено на подписке —
-> ровно как показывает `/status`.
+Note: these are API list prices — what the usage would cost, not what a
+subscription actually charges (same numbers `/status` shows).
 
-## Цвета и рендер
+## Performance
 
-Палитра подстраивается под терминал: фон берётся родной (`use_default_colors`),
-цвета выбираются по числу поддерживаемых (256 → аккуратные оттенки, 8/16 → базовые,
-без цвета → только жирный/инверсия). Работает и на тёмном, и на светлом фоне.
-Выделенная строка подсвечивается на всю ширину (белый на синем) с маркером `>`.
+The full JSONL parse (gigabytes) happens once: parsed state is snapshotted
+to `~/.cache/ccost/state.pickle` and later runs start in a fraction of a
+second, reading only newly appended bytes. Cold parses run across several
+processes. Prices are not part of the snapshot, so repricing never triggers
+a re-parse.
 
-UTF-8 для графики (`█ ▏▎▍`) включается принудительно ещё до `initscr` (проверка по
-`nl_langinfo(CODESET)`), поэтому бары не превращаются в `?` даже если `LANG` не выставлен.
+## Rendering
 
-Заголовки чатов санируются: сырые ANSI-коды и управляющие символы вырезаются,
-а эмодзи/CJK (символы двойной ширины) заменяются на `·` — иначе curses считает
-ширину по колонкам, python по кодпоинтам, колонки уезжают, а старый системный
-ncurses на краю экрана режет широкий символ в `?` (привет, kitty).
-
-- `NO_COLOR=1 ccost` — полностью выключить цвета.
-- `CCOST_ASCII=1 ccost` — рисовать графику на ASCII (`#`, `.:-=+*`) вместо блоков.
-
-## Заметки
-
-- Новые модели должны быть в таблице `PRICE`, иначе стоимость по ним = $0
-  (такие модели выводятся отдельной строкой-предупреждением).
-- Записи с нулём токенов (синтетические сообщения) отбрасываются.
-- `ccost json` отдаёт totals + разбивки по моделям/дням/чатам/проектам/часам.
+The palette adapts to the terminal (256-color, 8/16, or mono), the
+background stays native, and UTF-8 glyphs are enabled before `initscr` so
+bars do not degrade to `?` even without `LANG`. `NO_COLOR=1` disables
+colors, `CCOST_ASCII=1` forces ASCII graphics. Chat titles are sanitized
+(ANSI codes stripped, wide glyphs replaced) so layouts never break.

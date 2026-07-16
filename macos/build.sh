@@ -1,8 +1,8 @@
 #!/bin/sh
-# Сборка ccost.app: swiftc + иконка + движок внутрь Resources.
-# Движок — полноценный бинарь: CCOST_ENGINE=/путь/к/бинарю sh build.sh
-# (иначе соберётся pyinstaller'ом из PATH; последний фолбэк — скрипт,
-# такой сборке нужен системный python3 — только для разработки).
+# Build ccost.app: swiftc + icon + engine into Resources.
+# The engine is a standalone binary: CCOST_ENGINE=/path/to/binary sh build.sh
+# (otherwise pyinstaller from PATH builds it; last fallback is the script,
+# which needs system python3 — dev only).
 set -e
 cd "$(dirname "$0")"
 APP="dist/ccost.app"
@@ -17,7 +17,7 @@ elif command -v pyinstaller >/dev/null 2>&1; then
         --workpath dist/build --specpath dist dist/ccost.py
     cp dist/engine/ccost-engine "$APP/Contents/Resources/ccost"
 else
-    echo "внимание: pyinstaller не найден — кладу скрипт (нужен python3)" >&2
+    echo "warning: pyinstaller not found — bundling the script (needs python3)" >&2
     cp ../ccost "$APP/Contents/Resources/ccost"
 fi
 chmod +x "$APP/Contents/Resources/ccost"
@@ -25,4 +25,4 @@ cp Info.plist "$APP/Contents/Info.plist"
 swift gen-icon.swift dist/ccost.iconset
 iconutil -c icns dist/ccost.iconset -o "$APP/Contents/Resources/ccost.icns"
 rm -rf dist/ccost.iconset
-echo "готово: macos/dist/ccost.app"
+echo "done: macos/dist/ccost.app"

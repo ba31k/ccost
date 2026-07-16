@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
-"""ccost — статистика токенов и стоимости (по прайсу API) всех сессий Claude Code.
+"""ccost — token and cost statistics (at API list prices) for local Claude Code
+and Codex sessions.
 
-Читает локальные JSONL из ~/.claude/projects/, дедуплицирует вызовы по message.id
-(стриминг пишет несколько строк на сообщение с растущим usage — берём максимум,
-иначе resume/fork удваивают цифры, а первая строка занижает output) и считает
-стоимость по прайсу API, включая 1-часовой кэш (×2 против ×1.25 у 5-минутного).
+Reads JSONL from ~/.claude/projects/ and ~/.codex/sessions/, deduplicates by
+message.id (streaming writes several lines per message with growing usage, so we
+take the field-wise maximum; resume/fork would otherwise double the numbers) and
+prices usage at API rates, including the 1-hour cache (2x vs 1.25x for 5-minute).
 
-  ccost           — интерактивный TUI (live-режим, мышь, вкладки, периоды)
-  ccost gui       — live-дашборд в браузере (локальный сервер, ноль зависимостей)
-  ccost report    — полный текстовый отчёт (он же фолбэк для пайпа/не-tty)
-  ccost -r        — то же, что report
-  ccost json      — агрегаты в JSON (для скриптов)
+  ccost           — interactive TUI (live mode, mouse, tabs, periods)
+  ccost gui       — live dashboard in the browser (local server, zero deps)
+  ccost app       — same dashboard in a native window
+  ccost report    — full text report (also the fallback for pipes/non-tty)
+  ccost -r        — same as report
+  ccost json      — aggregates as JSON (for scripts)
 """
 import calendar
 import glob
@@ -28,12 +30,12 @@ from datetime import datetime, date, timedelta, timezone
 
 try:
     import curses
-except ImportError:            # Windows без windows-curses: report/json работают
+except ImportError:            # Windows without windows-curses: report/json still work
     curses = None
 
-# ---------------------------------------------------------------- прайс / цены
+# ---------------------------------------------------------------- prices
 
-# Anthropic: $ за 1M токенов (input, output); кэш-чтение = 0.1× input
+# Anthropic: $ per 1M tokens (input, output); cache read = 0.1x input
 PRICE = {
     "claude-fable-5":            (10, 50),
     "claude-opus-4-8":           (5, 25),
@@ -44,8 +46,8 @@ PRICE = {
     "claude-sonnet-4-6":         (3, 15),
     "claude-haiku-4-5":          (1, 5),
 }
-# OpenAI (Codex): $ за 1M токенов (input, output, cached input) —
-# по developers.openai.com/api/docs/pricing, июль 2026
+# OpenAI (Codex): $ per 1M tokens (input, output, cached input) —
+# per developers.openai.com/api/docs/pricing, July 2026
 PRICE_OPENAI = {
     "gpt-5.6-sol":   (5.0, 30.0, 0.50),
     "gpt-5.6-terra": (2.5, 15.0, 0.25),
@@ -62,13 +64,13 @@ PRICE_OPENAI = {
     "gpt-5":         (1.25, 10.0, 0.125),
     "codex-5.6-sol": (5.0, 30.0, 0.50),
 }
-CACHE_W_5M = 1.25    # anthropic: запись в 5-мин ephemeral-кэш = 1.25× input
-CACHE_W_1H = 2.0     # anthropic: запись в 1-час ephemeral-кэш = 2× input
-CACHE_READ = 0.10    # anthropic: чтение из кэша = 0.1× input
+CACHE_W_5M = 1.25    # anthropic: 5-minute ephemeral cache write = 1.25x input
+CACHE_W_1H = 2.0     # anthropic: 1-hour ephemeral cache write = 2x input
+CACHE_READ = 0.10    # anthropic: cache read = 0.1x input
 
 TS_FORMATS = ("%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ")
 
-# ---------------------------------------------------------------- конфиг
+# ---------------------------------------------------------------- config
 
 CONFIG_PATH = os.path.expanduser("~/.ccost.json")
 VERSION = "1.4.0"
@@ -77,7 +79,7 @@ DEFAULT_CFG = {"sources": {"claude": True, "codex": True},
                "claude_root": None, "codex_root": None,
                "refresh_ms": 3000, "default_period": 0,
                "menubar": True, "check_updates": True,
-               "prices": {}}     # переопределение цен: {модель: [in, out(, cached)]}
+               "prices": {}}     # price overrides: {model: [in, out(, cached)]}
 SOURCES = ("claude", "codex")
 
 
@@ -110,7 +112,7 @@ CFG = load_config()
 
 
 def claude_root():
-    # CCOST_ROOT — например, из Windows смотреть в WSL:
+    # CCOST_ROOT — e.g. point Windows at WSL data:
     # CCOST_ROOT=\\wsl.localhost\Ubuntu\home\user\.claude\projects
     return (os.environ.get("CCOST_ROOT") or CFG.get("claude_root")
             or os.path.expanduser("~/.claude/projects"))
@@ -126,9 +128,8 @@ def source_roots():
 
 
 def price_for(model):
-    """(input, output, cached) $/1M; префикс-матч длиннейшим ключом
-    (иначе gpt-5 перехватит gpt-5.4). Сначала — переопределения из конфига.
-    None — модели нет в прайсе."""
+    """(input, output, cached) $/1M; longest-prefix match (so gpt-5 does not
+    shadow gpt-5.4). Config overrides win. None — model is not priced."""
     ov = CFG.get("prices") or {}
     hit = ov.get(model)
     if hit is None:
@@ -155,8 +156,8 @@ def price_for(model):
 
 
 def cost_of(model, tin, tout, cw, cr, cw1h):
-    """Единая формула: у codex-записей cw=0, кэшированный input лежит в cr
-    и тарифицируется своей ценой. None — модели нет в прайсе."""
+    """One formula for both providers: codex records have cw=0 and keep cached
+    input in cr, priced at its own rate. None — model is not priced."""
     p = price_for(model)
     if p is None:
         return None
@@ -178,9 +179,9 @@ def parse_ts(s):
 
 
 def h(n):
-    """Человекочитаемый размер токенов: 1234567 -> 1.2M (без «1000.0K»)."""
+    """Human-readable token count: 1234567 -> 1.2M (never "1000.0K")."""
     for unit, size in (("B", 1e9), ("M", 1e6), ("K", 1e3)):
-        if n >= size * 0.9995:               # 999950 -> 1.0M, а не 1000.0K
+        if n >= size * 0.9995:               # 999950 -> 1.0M, not 1000.0K
             return f"{n / size:.1f}{unit}"
     return str(int(n))
 
@@ -197,15 +198,15 @@ ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[0-9A-Za-z]")
 
 
 def clean_text(s):
-    """Заголовки чатов — произвольный пользовательский текст: там встречаются
-    сырые ANSI-коды, эмодзи и CJK. Широкие символы ломают колоночную вёрстку
-    (curses считает ширину по колонкам, python — по кодпоинтам), а старый
-    ncurses на краю экрана режет их в «?» — заменяем на «·», контролы режем."""
+    """Chat titles are arbitrary user text: raw ANSI codes, emoji, CJK. Wide
+    characters break column layout (curses counts columns, python counts code
+    points) and old ncurses mangles them at the screen edge — replace wide
+    glyphs with a middle dot and strip control characters."""
     s = ANSI_RE.sub("", s)
     out = []
     for ch in s:
         if ch == "�" or unicodedata.category(ch)[0] == "C":
-            out.append(" ")            # ZWSP и прочие: пробел, чтобы слова не слипались
+            out.append(" ")            # ZWSP etc: keep a space so words do not fuse
             continue
         if ord(ch) > 0xFFFF or unicodedata.east_asian_width(ch) in ("W", "F"):
             out.append("·")
@@ -214,7 +215,7 @@ def clean_text(s):
     return "".join(out)
 
 
-# ---------------------------------------------------------------- сбор данных
+# ---------------------------------------------------------------- data collection
 
 class Rec:
     __slots__ = ("t", "model", "session", "project", "src",
@@ -223,37 +224,38 @@ class Rec:
 
 
 class Collector:
-    """Инкрементальный парсер JSONL: помнит, до какого байта дочитан каждый
-    файл, и на повторном scan() разбирает только дописанное — это и делает
-    возможным live-режим. Источники: Claude Code (дедуп по message.id,
-    пофилдовый максимум) и Codex/OpenAI (события token_count)."""
+    """Incremental JSONL parser: remembers how far each file has been read and
+    on repeated scan() only parses appended bytes — this is what makes live
+    mode possible. Sources: Claude Code (dedup by message.id, field-wise max)
+    and Codex/OpenAI (token_count events)."""
 
     def __init__(self, use_cache=True):
         self.by_mid = {}
         self.records = []
         self.titles = {}
         self.unknown = set()
-        self.pos = {}            # путь -> байт, до которого файл разобран
-        self.seen_tools = set()  # id tool_use/function_call (дедуп вызовов)
-        self.seen_codex = set()  # дедуп codex token_count-событий
-        self.codex_state = {}    # путь -> {sid, proj, model, tools} (стейт файла)
-        self.dirty = set()       # записи, которым нужно пересчитать cost
-        self.progress = (0, 0)   # (файлов разобрано, всего) — для GUI-прогресса
-        self.track_keys = False  # режим воркера: помнить дедуп-ключ записи
+        self.pos = {}            # path -> byte offset parsed so far
+        self.seen_tools = set()  # tool_use/function_call ids (call dedup)
+        self.seen_codex = set()  # codex token_count event dedup
+        self.codex_state = {}    # path -> {sid, proj, model, tools} (file state)
+        self.dirty = set()       # records whose cost needs recomputing
+        self.progress = (0, 0)   # (files parsed, total) — for GUI progress
+        self.track_keys = False  # worker mode: remember each record's dedup key
         self._rec_keys = {}
         self._saved_at = 0.0
         if use_cache:
-            self.load_cache()    # тёплый старт: снапшот вместо повторного парса
+            self.load_cache()    # warm start: snapshot instead of a full re-parse
 
-    # ------------------------------------------------------------ снапшот
-    # Полный парс 1+ГБ JSONL занимает секунды; снапшот разобранного состояния
-    # на диске сводит запуск к долям секунды — дочитываются только новые байты.
+    # ------------------------------------------------------------ snapshot
+    # A full parse of 1+GB of JSONL takes seconds; a snapshot of parsed state
+    # on disk brings startup down to a fraction of a second — only new bytes
+    # get read.
     _REC_FIELDS = ("t", "model", "session", "project", "src", "tin", "tout",
                    "cw", "cr", "cw1h", "cost", "day", "hour", "wd", "tools")
 
     @staticmethod
     def _cache_ver():
-        return (2,)              # цены в снапшот не входят — recost() на загрузке
+        return (2,)              # prices are not part of the snapshot — recost() on load
 
     @staticmethod
     def _cache_path():
@@ -286,12 +288,12 @@ class Collector:
         self.seen_codex = data["seen_codex"]
         self.codex_state = data["codex_state"]
         self._saved_at = time.time()
-        self.recost()            # цены могли смениться со времени снапшота
+        self.recost()            # prices may have changed since the snapshot
         return True
 
     def recost(self):
-        """Пересчитать стоимость всех записей по текущему прайсу
-        (включая переопределения из конфига)."""
+        """Recompute the cost of every record at current prices
+        (including config overrides)."""
         self.unknown = set()
         for r in self.records:
             c = cost_of(r.model, r.tin, r.tout, r.cw, r.cr, r.cw1h)
@@ -323,8 +325,8 @@ class Collector:
             pass
 
     def scan(self):
-        """Дочитывает новые/изменённые файлы включённых источников.
-        True — данные изменились."""
+        """Read new/changed files of enabled sources.
+        True — data changed."""
         changed = False
         jobs = []
         roots = source_roots()
@@ -344,14 +346,14 @@ class Collector:
             if size != done:
                 pending.append((src, fp))
                 total_new += size - done if size > done else size
-        # холодный старт: сотни мегабайт разбираем в несколько процессов
+        # cold start: hundreds of megabytes get parsed across processes
         if total_new > 200 * 1024 * 1024 and len(pending) > 8:
             try:
                 if self._scan_parallel(pending):
                     changed = True
                 pending = []
             except Exception:
-                pass                 # фолбэк — последовательный разбор ниже
+                pass                 # fall back to the sequential parse below
         for n, (src, fp) in enumerate(pending):
             self.progress = (n + 1, len(pending))
             if self._parse_file(src, fp):
@@ -366,11 +368,11 @@ class Collector:
             self.dirty.clear()
             changed = True
         if changed and time.time() - self._saved_at > 300:
-            self.save_cache()      # раз в ~5 минут; потеря — лишь дочитать хвост
+            self.save_cache()      # every ~5 min; a loss just means re-reading the tail
         return changed
 
     def _parse_file(self, src, fp):
-        """Дочитать один файл с сохранённой позиции. True — что-то разобрано."""
+        """Read one file from its saved offset. True — something was parsed."""
         try:
             size = os.path.getsize(fp)
         except OSError:
@@ -379,7 +381,7 @@ class Collector:
         if size == done:
             return False
         if size < done:
-            done = 0                 # файл переписан — заново (дедуп спасает)
+            done = 0                 # file was rewritten — re-read (dedup saves us)
         try:
             fh = open(fp, "rb")
         except OSError:
@@ -389,7 +391,7 @@ class Collector:
             data = fh.read()
         end = data.rfind(b"\n") + 1
         if end == 0:
-            return False             # недописанная строка — дождёмся тика
+            return False             # incomplete line — wait for the next tick
         self.pos[fp] = done + end
         changed = False
         for raw in data[:end].split(b"\n"):
@@ -404,8 +406,8 @@ class Collector:
         return changed
 
     def _scan_parallel(self, pending):
-        """Холодный парс по процессам; слияние с дедупликацией:
-        claude — пофилдовый максимум по message.id, codex — по ключу события."""
+        """Cold parse across processes; merge with dedup: claude — field-wise
+        max by message.id, codex — by event key."""
         import multiprocessing as mp
         nproc = max(2, min(4, os.cpu_count() or 2))
         chunks = [c for c in (pending[i::nproc] for i in range(nproc)) if c]
@@ -428,7 +430,7 @@ class Collector:
                 setattr(r, f, v)
             if key is not None and key[0] == "mid":
                 cur = self.by_mid.get(key[1])
-                if cur is not None:      # копия сообщения из другого воркера
+                if cur is not None:      # copy of a message seen by another worker
                     for f in ("tin", "tout", "cw", "cr", "cw1h"):
                         v = getattr(r, f)
                         if v > getattr(cur, f):
@@ -474,10 +476,10 @@ class Collector:
         cw = u.get("cache_creation_input_tokens", 0)
         cr = u.get("cache_read_input_tokens", 0)
         if tin + tout + cw + cr == 0:
-            return False               # синтетические/пустые сообщения
+            return False               # synthetic/empty messages
         cc = u.get("cache_creation") or {}
         cw1h = cc.get("ephemeral_1h_input_tokens", 0)
-        mid = m.get("id") or object()  # нет id — не дедуплицируем
+        mid = m.get("id") or object()  # no id — do not dedup
         r = self.by_mid.get(mid)
         touched = False
         if r is None:
@@ -498,7 +500,7 @@ class Collector:
                 self._rec_keys[id(r)] = ("mid", mid) if isinstance(mid, str) else None
             touched = True
         else:
-            # стриминг: строки одного сообщения с растущим usage
+            # streaming: lines of one message with growing usage
             for f, v in (("tin", tin), ("tout", tout), ("cw", cw),
                          ("cr", cr), ("cw1h", cw1h)):
                 if v > getattr(r, f):
@@ -530,7 +532,7 @@ class Collector:
             bid = b.get("id")
             if bid:
                 if bid in self.seen_tools:
-                    continue           # дубль из resume/fork
+                    continue           # duplicate from resume/fork
                 self.seen_tools.add(bid)
             names.append(b.get("name") or "?")
         return names
@@ -558,9 +560,9 @@ class Collector:
 
     # ------------------------------------------------------------ codex
     def _line_codex(self, fp, line):
-        """Rollout-файлы Codex CLI (~/.codex/sessions): usage приходит
-        событиями token_count (last_token_usage = один запрос к API),
-        модель и cwd — из turn_context/session_meta."""
+        """Codex CLI rollout files (~/.codex/sessions): usage arrives as
+        token_count events (last_token_usage = one API request), model and
+        cwd come from turn_context/session_meta."""
         if '"token_count"' not in line and '"session_meta"' not in line \
                 and '"turn_context"' not in line and '"user_message"' not in line \
                 and '"function_call"' not in line:
@@ -615,15 +617,15 @@ class Collector:
         key = (st["sid"], o.get("timestamp"), tin_all, tout,
                u.get("total_tokens", 0))
         if key in self.seen_codex:
-            return False               # дубль из resume
+            return False               # duplicate from resume
         self.seen_codex.add(key)
         r = Rec()
         r.src = "codex"
         r.model = st["model"]
         r.session = st["sid"]
         r.project = st["proj"]
-        r.tin = max(tin_all - cached, 0)   # cached — подмножество input
-        r.cr = cached                      # кэш-чтения, своя цена в прайсе
+        r.tin = max(tin_all - cached, 0)   # cached is a subset of input
+        r.cr = cached                      # cache reads, priced separately
         r.cw = r.cw1h = 0
         r.tout = tout
         r.tools = tuple(st["tools"])
@@ -646,8 +648,8 @@ class Collector:
 
 
 def _parse_chunk(files):
-    """Воркер параллельного холодного парса (Collector._scan_parallel):
-    разбирает свою пачку файлов и возвращает сериализуемое состояние."""
+    """Worker for the parallel cold parse (Collector._scan_parallel): parses
+    its batch of files and returns serializable state."""
     co = Collector(use_cache=False)
     co.track_keys = True
     for src, fp in files:
@@ -662,7 +664,7 @@ def _parse_chunk(files):
     }
 
 
-# ---------------------------------------------------------------- агрегация
+# ---------------------------------------------------------------- aggregation
 
 def tok(a):
     return a["tin"] + a["tout"] + a["cw"] + a["cr"]
@@ -687,8 +689,8 @@ def aggregate(records, keyfn):
 
 
 def tools_agg(records):
-    """Счётчик вызовов инструментов; стоимость сообщения делится поровну
-    между его вызовами (приблизительная атрибуция)."""
+    """Tool call counter; a message's cost is split evenly across its calls
+    (approximate attribution)."""
     d = {}
     for r in records:
         if not r.tools:
@@ -707,8 +709,8 @@ def top_model(a):
 
 
 def cache_saved(records):
-    """Сколько сэкономил кэш против мира без кэша (чтения по полной цене,
-    но и без наценок за запись)."""
+    """How much the cache saved vs a world without it (reads at full price,
+    but no write premiums either)."""
     saved = 0.0
     for r in records:
         p = price_for(r.model)
@@ -723,7 +725,7 @@ def cache_saved(records):
 
 
 def fun_records(records, titles):
-    """Рекорды за всю историю — фан-факты для дашборда."""
+    """All-time records — fun facts for the dashboard."""
     if not records:
         return []
     hourly = defaultdict(float)
@@ -751,19 +753,19 @@ def fun_records(records, titles):
 
     if hourly:
         (d, hh), c = max(hourly.items(), key=lambda kv: kv[1])
-        add("самый дорогой час", money(c), f"{d} {hh:02d}:00")
+        add("priciest hour", money(c), f"{d} {hh:02d}:00")
     if daily:
         d, c = max(daily.items(), key=lambda kv: kv[1])
-        add("самый дорогой день", money(c), d)
+        add("priciest day", money(c), d)
     if day_tok:
         d, n = max(day_tok.items(), key=lambda kv: kv[1])
-        add("рекорд токенов за день", h(n), d)
+        add("most tokens in a day", h(n), d)
     if sess:
         sid, (t0, t1, c) = max(sess.items(), key=lambda kv: kv[1][2])
-        add("самый дорогой чат", money(c), titles.get(sid, "(" + str(sid)[:8] + ")")[:44])
+        add("priciest chat", money(c), titles.get(sid, "(" + str(sid)[:8] + ")")[:44])
         sid, (t0, t1, c) = max(sess.items(), key=lambda kv: kv[1][1] - kv[1][0])
         dur = t1 - t0
-        add("самый долгий чат", f"{dur / 3600:.1f} ч",
+        add("longest chat", f"{dur / 3600:.1f} h",
             titles.get(sid, "(" + str(sid)[:8] + ")")[:44])
     ds = sorted(daily)
     if ds:
@@ -777,10 +779,10 @@ def fun_records(records, titles):
             if n > best_n:
                 best_n, best_end = n, d
             prev = d
-        add("лучший стрик", f"{best_n} дн.", "по " + best_end)
+        add("best streak", f"{best_n} days", "ended " + best_end)
     if tools:
         name, calls = tools.most_common(1)[0]
-        add("любимый инструмент", f"{calls:,}".replace(",", " "), name)
+        add("favorite tool", f"{calls:,}", name)
     return out
 
 
@@ -840,8 +842,8 @@ def overview(records):
 
 
 def fill_days(days):
-    """Непрерывный ряд (день, $) от первого до последнего дня — с нулями
-    в дни без активности, чтобы ось времени спарклайна не врала."""
+    """Continuous (day, $) series from first to last day, with zeros for
+    idle days so the sparkline's time axis does not lie."""
     if not days:
         return []
     ds = sorted(days)
@@ -849,7 +851,7 @@ def fill_days(days):
         d0, d1 = date.fromisoformat(ds[0]), date.fromisoformat(ds[-1])
     except ValueError:
         return [(k, days[k]["cost"]) for k in ds]
-    if (d1 - d0).days > 730:                  # защита от мусорных таймстампов
+    if (d1 - d0).days > 730:                  # guard against garbage timestamps
         return [(k, days[k]["cost"]) for k in ds]
     out = []
     d = d0
@@ -861,9 +863,9 @@ def fill_days(days):
     return out
 
 
-# ---------------------------------------------------------------- периоды
+# ---------------------------------------------------------------- periods
 
-PERIODS = ["всё", "сегодня", "7 дней", "30 дней", "месяц"]
+PERIODS = ["all", "today", "7 days", "30 days", "month"]
 
 
 def cutoff(idx):
@@ -889,7 +891,7 @@ def apply_period(records, idx):
     return [r for r in records if r.t >= c]
 
 
-# ---------------------------------------------------------------- графики
+# ---------------------------------------------------------------- charts
 
 FULL = "█"
 EIGHTHS = "▏▎▍▌▋▊▉█"
@@ -899,7 +901,7 @@ BOX = "┌┐└┘─│"
 
 
 def set_ascii_glyphs():
-    """Фолбэк, когда UTF-8 недоступен: рисуем графику на ASCII, а не на ?."""
+    """Fallback when UTF-8 is unavailable: draw with ASCII instead of ?."""
     global FULL, EIGHTHS, SPARK, SEP, BOX
     FULL = "#"
     EIGHTHS = " .:-=+*#"
@@ -935,29 +937,29 @@ def spark_level(v, mx):
     return max(1, min(int(v / mx * 8), 8))
 
 
-# ---------------------------------------------------------------- текстовый режим
+# ---------------------------------------------------------------- text mode
 
 def print_text(co):
     records, titles, unknown = co.records, co.titles, co.unknown
     ov = overview(records)
     if not ov:
-        print("нет данных")
+        print("no data")
         return
     print()
-    print(f"  ВСЕГО   {ov['tok']:,} токенов   ≈ {money(ov['cost'])} (по прайсу API)")
-    print(f"          {ov['msgs']:,} сообщений · {ov['sessions']} чатов · "
-          f"{ov['ndays']} дней ({ov['first']} … {ov['last']}) · "
-          f"стрик {ov['streak']} дн.")
+    print(f"  TOTAL   {ov['tok']:,} tokens   ≈ {money(ov['cost'])} (at API list prices)")
+    print(f"          {ov['msgs']:,} messages · {ov['sessions']} chats · "
+          f"{ov['ndays']} days ({ov['first']} … {ov['last']}) · "
+          f"streak {ov['streak']} days")
     bd, bh = ov["busiest_day"], ov["peak_hour"]
     peak = f"{bh[0]:02d}:00" if bh[0] >= 0 else "—"
-    print(f"          пик дня: {bd[0]} ({money(bd[1]['cost'])}) · "
-          f"пик часа: {peak} · ${ov['avg_day']:.2f}/день · "
-          f"сегодня {money(ov['today'])} · кэш-чтения {ov['cache_share']:.1f}% токенов")
-    print(f"          кэш сэкономил ≈ {money(ov['saved'])} "
-          f"(без кэша ≈ {money(ov['cost'] + ov['saved'])}) · "
-          f"прогноз на месяц {money(ov['forecast'])}")
+    print(f"          peak day: {bd[0]} ({money(bd[1]['cost'])}) · "
+          f"peak hour: {peak} · ${ov['avg_day']:.2f}/day · "
+          f"today {money(ov['today'])} · cache reads {ov['cache_share']:.1f}% of tokens")
+    print(f"          cache saved ≈ {money(ov['saved'])} "
+          f"(without cache ≈ {money(ov['cost'] + ov['saved'])}) · "
+          f"month forecast {money(ov['forecast'])}")
     if unknown:
-        print(f"          нет прайса (стоимость = $0): {', '.join(sorted(unknown))}")
+        print(f"          no price (counted as $0): {', '.join(sorted(unknown))}")
 
     def table(title, agg, namefn, sortkey="cost", limit=15, showmodel=False):
         rows = sorted(agg.items(), key=lambda kv: -kv[1][sortkey])[:limit]
@@ -972,26 +974,26 @@ def print_text(co):
             mdl = f" {top_model(a).replace('claude-', ''):11}" if showmodel else ""
             print(f"  {name:30}{mdl} {b:14} {h(tok(a)):>7} {money(a['cost']):>11}")
 
-    table("МОДЕЛИ", aggregate(records, lambda r: r.model),
+    table("MODELS", aggregate(records, lambda r: r.model),
           lambda k, a: k.replace("claude-", ""))
     days = aggregate(records, lambda r: r.day)
     days.pop("?", None)
-    table("ДНИ (топ по $)", days, lambda k, a: k)
+    table("DAYS (top by $)", days, lambda k, a: k)
     chats = aggregate(records, lambda r: r.session)
-    table("ЧАТЫ", chats,
+    table("CHATS", chats,
           lambda k, a: titles.get(k, "(" + k[:8] + ")"), showmodel=True)
-    table("ПРОЕКТЫ", aggregate(records, lambda r: r.project), lambda k, a: k)
+    table("PROJECTS", aggregate(records, lambda r: r.project), lambda k, a: k)
     tools = tools_agg(records)
     if tools:
         rows = sorted(tools.items(), key=lambda kv: -kv[1]["calls"])[:15]
         mx = rows[0][1]["calls"] or 1
-        print("\n  ИНСТРУМЕНТЫ (по вызовам)")
+        print("\n  TOOLS (by calls)")
         print("  " + "-" * 72)
         for k, a in rows:
             print(f"  {k[:30]:30} {bar(a['calls'] / mx, 14):14} "
                   f"{a['calls']:>7,} {money(a['cost']):>11}")
     hours = aggregate([r for r in records if r.hour >= 0], lambda r: r.hour)
-    print("\n  ЧАСЫ (по $, локальное время)")
+    print("\n  HOURS (by $, local time)")
     print("  " + "-" * 72)
     mxh = max((a["cost"] for a in hours.values()), default=1) or 1
     for hh in range(24):
@@ -1055,12 +1057,12 @@ def print_json(co):
     print()
 
 
-# ---------------------------------------------------------------- GUI (браузер)
+# ---------------------------------------------------------------- GUI (browser)
 
 def gui_payload(co, period, day=None):
-    """Все данные дашборда одним куском; вызывается на каждый poll.
-    day=YYYY-MM-DD — детализация дня: график остаётся периодным (контекст),
-    всё остальное считается по выбранному дню."""
+    """All dashboard data in one payload; called on every poll.
+    day=YYYY-MM-DD — day drill-down: the day chart keeps the period for
+    context, everything else is computed for the selected day."""
     enabled = [r for r in co.records if CFG["sources"].get(r.src, True)]
     f_all = apply_period(enabled, period)
     f = [r for r in f_all if r.day == day] if day else f_all
@@ -1127,7 +1129,7 @@ def gui_payload(co, period, day=None):
 
 
 def _year_series(records):
-    """365 дней стоимости для годового календаря (вся история, без периода)."""
+    """365 days of cost for the year calendar (all-time, ignores period)."""
     daily = defaultdict(float)
     for r in records:
         if r.day != "?":
@@ -1146,7 +1148,7 @@ UPDATE = {"info": None}
 
 
 def check_updates_loop():
-    """Раз в 6 часов смотрит последний релиз на GitHub (если включено)."""
+    """Checks the latest GitHub release every 6 hours (when enabled)."""
     import urllib.request
 
     def ver(s):
@@ -1191,7 +1193,7 @@ body{
   background:var(--bg); color:var(--ink); font-family:var(--sans);
   font-size:14px; line-height:1.45; min-height:100vh;
 }
-body::before{ /* фосфорные сканлайны, едва заметные */
+body::before{ /* faint phosphor scanlines */
   content:""; position:fixed; inset:0; pointer-events:none; z-index:0;
   background:
     radial-gradient(900px 340px at 24% -60px, rgba(45,212,200,.055), transparent 70%),
@@ -1270,7 +1272,7 @@ main.dim{opacity:.45}
 .panel h2{margin-bottom:14px}
 .cols{display:grid; grid-template-columns:1fr 1fr; gap:16px}
 @media (max-width:880px){.cols{grid-template-columns:1fr}}
-/* график по дням */
+/* daily bar chart */
 .chart{position:relative; height:210px}
 .gridline{position:absolute; left:0; right:0; border-top:1px solid var(--line)}
 .gridline span{position:absolute; right:0; top:-16px; color:var(--dim);
@@ -1289,7 +1291,7 @@ body.day-mode .cards{display:none}
 .bars .b:hover{filter:brightness(1.3)}
 .axis{display:flex; justify-content:space-between; color:var(--dim);
   font:10.5px var(--mono); margin-top:6px}
-/* хитмап */
+/* heatmap */
 .heatwrap{display:grid; grid-template-columns:26px 1fr; gap:6px; align-items:start}
 .heatdays{display:grid; grid-template-rows:repeat(7,16px); gap:3px;
   color:var(--dim); font:10.5px var(--mono); line-height:16px}
@@ -1311,7 +1313,7 @@ body.day-mode .cards{display:none}
 .axis.axis24 span:nth-child(3){grid-column:13}
 .axis.axis24 span:nth-child(4){grid-column:19}
 .axis.axis24 span:nth-child(5){grid-column:24; justify-self:end}
-/* строки-списки */
+/* list rows */
 @keyframes rowin{from{opacity:0; transform:translateY(6px)} to{opacity:1; transform:none}}
 .rows{display:flex; flex-direction:column}
 .row{display:grid; grid-template-columns:minmax(0,1fr) auto; gap:4px 14px;
@@ -1345,11 +1347,11 @@ body.day-mode .cards{display:none}
   box-shadow:0 6px 24px rgba(0,0,0,.5)}
 #tip b{color:var(--money)}
 footer{color:var(--dim); font:11px var(--mono); text-align:center; padding:4px 0 26px}
-/* своя рамка окна: шапка = тайтлбар */
+/* custom window chrome: header acts as the titlebar */
 body.chrome-mac header{padding:13px 28px 8px 92px; min-height:52px;
   -webkit-user-select:none; cursor:default}
-body.chrome-mac .hright{align-self:center}   /* на линии светофоров */
-body.chrome-mac .brand{display:none}         /* окно само себя подписывает */
+body.chrome-mac .hright{align-self:center}   /* aligned with traffic lights */
+body.chrome-mac .brand{display:none}         /* the window labels itself */
 body.chrome-mac header{justify-content:flex-end}
 #conn{font:11px var(--mono); color:#e0b072; border:1px solid #4a3620;
   background:#1c1610; padding:3px 8px; border-radius:6px; align-self:center}
@@ -1366,10 +1368,10 @@ body.chrome-win nav{margin-left:auto}
   width:44px; height:30px; border-radius:0; font:12px var(--mono); cursor:pointer}
 #winctl button:hover{background:#1d2733; color:var(--ink)}
 #winctl button.x:hover{background:#c42b1c; color:#fff}
-/* скроллбары скрыты полностью — прокрутка колесом/трекпадом работает */
+/* scrollbars fully hidden — wheel/trackpad scrolling still works */
 ::-webkit-scrollbar{display:none; width:0; height:0}
 html{scrollbar-width:none; -ms-overflow-style:none}
-/* пустое состояние: данных нет вообще или за период */
+/* empty state: no data at all, or none for the period */
 body.nodata .cards, body.nodata .cols, body.nodata main > .panel{display:none}
 #emptybox{border:1px dashed #2a3440; border-radius:10px; padding:38px 26px;
   text-align:center}
@@ -1380,13 +1382,13 @@ body.nodata .cards, body.nodata .cols, body.nodata main > .panel{display:none}
   *{animation:none!important; transition:none!important}
 }
 
-/* правый блок шапки: периоды + шестерёнка */
+/* header right block: periods + gear */
 .hright{display:flex; align-items:center; gap:12px}
 #gear{appearance:none; border:0; background:transparent; color:var(--dim);
   width:28px; height:28px; display:flex; align-items:center; justify-content:center;
   border-radius:6px; cursor:pointer; transition:color .2s, transform .35s}
 #gear:hover{color:var(--ink); transform:rotate(45deg)}
-/* панель настроек */
+/* settings drawer */
 #shade{position:fixed; inset:0; background:rgba(4,6,8,.55); z-index:19}
 #drawer{position:fixed; top:0; right:0; bottom:0; width:340px; z-index:20;
   background:var(--panel); border-left:1px solid var(--line);
@@ -1419,11 +1421,11 @@ body.chrome-win #drawer{top:30px}
 .pricetbl .ph{color:var(--amber); font:600 10px var(--sans);
   text-transform:uppercase; letter-spacing:.1em}
 
-/* баннер обновления */
+/* update banner */
 #upd{font:700 11px var(--mono); color:#0b0e12; background:var(--amber);
   border-radius:6px; padding:3px 9px; text-decoration:none; align-self:center}
 #upd:hover{filter:brightness(1.12)}
-/* годовой календарь */
+/* year calendar */
 #yearwrap{overflow-x:auto; padding-bottom:4px}
 #yearmonths{position:relative; height:14px; font:10px var(--mono); color:var(--dim)}
 #yearmonths span{position:absolute; top:0}
@@ -1433,7 +1435,7 @@ body.chrome-win #drawer{top:30px}
   transition:background .5s ease}
 #year i.has{cursor:pointer}
 #year i.has:hover{outline:1px solid var(--teal)}
-/* рекорды */
+/* records */
 #recs{display:grid; grid-template-columns:repeat(auto-fit,minmax(205px,1fr)); gap:12px}
 .rec{border:1px solid var(--line); border-radius:8px; padding:11px 13px;
   background:var(--panel2)}
@@ -1443,7 +1445,7 @@ body.chrome-win #drawer{top:30px}
   font-variant-numeric:tabular-nums}
 .rec .rs{color:var(--dim); font:11px var(--mono); margin-top:3px;
   white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
-/* редактируемые цены */
+/* editable prices */
 .pricetbl input{width:70px; appearance:none; border:1px solid var(--line);
   background:var(--panel2); color:var(--ink); font:11.5px var(--mono);
   border-radius:5px; padding:3px 6px; text-align:right}
@@ -1456,76 +1458,76 @@ body.chrome-win #drawer{top:30px}
 <body>
 <header>
   <div class="brand">ccost <span id="livedot"></span><span id="livelbl">live</span></div>
-  <span id="conn" hidden>нет связи</span>
+  <span id="conn" hidden>offline</span>
   <a id="upd" hidden target="_blank" rel="noopener"></a>
   <div class="hright">
-    <nav id="periods" aria-label="период"></nav>
-    <button id="gear" aria-label="настройки" title="настройки"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.09a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.09a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.09a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg></button>
+    <nav id="periods" aria-label="period"></nav>
+    <button id="gear" aria-label="settings" title="settings"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.09a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.09a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.09a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg></button>
   </div>
 </header>
 <main>
   <section class="hero" id="hero">
     <div id="bigcost"><span id="bignum">$0.00</span><span id="cursor"></span></div>
-    <div class="hero-sub" id="herosub">загрузка…</div>
+    <div class="hero-sub" id="herosub">loading…</div>
     <div id="loadbar" hidden><i></i></div>
   </section>
   <section id="emptybox" hidden></section>
   <div class="warn" id="warn" hidden></div>
   <section class="cards" id="cards"></section>
   <section class="panel">
-    <h2>стоимость по дням<span id="daysel" hidden></span></h2>
+    <h2>cost by day<span id="daysel" hidden></span></h2>
     <div class="chart" id="daychart"></div>
     <div class="axis" id="dayaxis"></div>
   </section>
   <div class="cols">
     <section class="panel">
-      <h2>неделя × часы</h2>
+      <h2>week × hours</h2>
       <div class="heatwrap">
-        <div class="heatdays">пн вт ср чт пт сб вс</div>
+        <div class="heatdays">mo tu we th fr sa su</div>
         <div>
           <div class="heatgrid" id="heat"></div>
           <div class="heathours"><span>00</span><span>06</span><span>12</span><span>18</span><span>23</span></div>
         </div>
       </div>
     </section>
-    <section class="panel"><h2>модели</h2><div class="rows" id="models"></div></section>
+    <section class="panel"><h2>models</h2><div class="rows" id="models"></div></section>
   </div>
   <div class="cols">
-    <section class="panel"><h2>топ-чаты</h2><div class="rows" id="chats"></div></section>
-    <section class="panel"><h2>инструменты</h2><div class="rows" id="tools"></div></section>
+    <section class="panel"><h2>top chats</h2><div class="rows" id="chats"></div></section>
+    <section class="panel"><h2>tools</h2><div class="rows" id="tools"></div></section>
   </div>
   <section class="panel">
-    <h2>часы суток</h2>
+    <h2>hours of day</h2>
     <div class="chart" id="hourchart" style="height:120px"></div>
     <div class="axis axis24"><span>00</span><span>06</span><span>12</span><span>18</span><span>23</span></div>
   </section>
   <section class="panel">
-    <h2>год</h2>
+    <h2>year</h2>
     <div id="yearwrap">
       <div id="yearmonths"></div>
       <div id="year"></div>
     </div>
   </section>
   <section class="panel">
-    <h2>рекорды</h2>
+    <h2>records</h2>
     <div id="recs"></div>
   </section>
-  <footer>ccost · live-дашборд · периоды: ←/→ или свайп · клик по бару дня — детали дня (Esc — сброс)</footer>
+  <footer>ccost · live dashboard · periods: ←/→ or swipe · click a day bar for details (Esc to reset)</footer>
 </main>
 <div id="tip"></div>
 <div id="shade" hidden></div>
-<aside id="drawer" aria-label="настройки">
-  <h3>настройки</h3>
-  <div id="cfgbody">загрузка…</div>
+<aside id="drawer" aria-label="settings">
+  <h3>settings</h3>
+  <div id="cfgbody">loading…</div>
 </aside>
 <script>
 "use strict";
 const $ = id => document.getElementById(id);
-const PERIODS = [["всё",0],["месяц",4],["30 дней",3],["7 дней",2],["сегодня",1]];
-let pi = 0;                                   // индекс в PERIODS (визуальный порядок)
+const PERIODS = [["all",0],["month",4],["30 days",3],["7 days",2],["today",1]];
+let pi = 0;                                   // index into PERIODS (visual order)
 let period = PERIODS[0][1];
-let selDay = null;                            // выбранный день (детализация)
-let LD = [];                                  // последний ряд дней (для листания)
+let selDay = null;                            // selected day (drill-down)
+let LD = [];                                  // last day series (for paging)
 const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
 const mainEl = document.querySelector("main");
 
@@ -1537,7 +1539,7 @@ function htok(n){
   return String(n);
 }
 
-/* плавный перекат числа */
+/* smooth number roll */
 function lerpMoney(el, to, instant){
   const from = +el.dataset.v || 0;
   el.dataset.v = to;
@@ -1550,7 +1552,7 @@ function lerpMoney(el, to, instant){
   })(t0);
 }
 
-/* тултипы: контент живёт на элементе (переживает live-обновления) */
+/* tooltips: content lives on the element (survives live updates) */
 const tip = $("tip");
 function bindTip(el){
   el.addEventListener("mousemove", e => {
@@ -1564,7 +1566,7 @@ function bindTip(el){
 }
 function esc(s){ const d = document.createElement("i"); d.textContent = s; return d.innerHTML; }
 
-/* ------------------------------------------------ период: бегунок и листание */
+/* ------------------------------------------------ period: slider and paging */
 const nav = $("periods");
 const thumb = document.createElement("div");
 thumb.id = "thumb";
@@ -1597,7 +1599,7 @@ function setDaySel(day, refetch = true){
   document.body.classList.toggle("day-mode", !!day);
   const chip = $("daysel");
   chip.hidden = !day;
-  if (day) chip.textContent = "· " + day + " · Esc — сброс";
+  if (day) chip.textContent = "· " + day + " · Esc to reset";
   if (refetch){ mainEl.classList.add("dim"); tick(true); }
 }
 addEventListener("resize", moveThumb);
@@ -1606,7 +1608,7 @@ addEventListener("keydown", e => {
     closeDrawer(); return;
   }
   if (e.key === "Escape" && selDay){ setDaySel(null); return; }
-  if (selDay){                                // в режиме дня ←/→ листают дни
+  if (selDay){                                // in day mode ←/→ page through days
     const i = LD.findIndex(x => x.d === selDay);
     if (e.key === "ArrowRight" && i >= 0 && i < LD.length - 1) setDaySel(LD[i+1].d);
     if (e.key === "ArrowLeft" && i > 0) setDaySel(LD[i-1].d);
@@ -1615,7 +1617,7 @@ addEventListener("keydown", e => {
   if (e.key === "ArrowRight") setPeriod(pi + 1);
   if (e.key === "ArrowLeft") setPeriod(pi - 1);
 });
-/* горизонтальный свайп трекпадом по герою — листает периоды */
+/* horizontal trackpad swipe over the hero pages periods */
 let wacc = 0, wlock = 0;
 $("hero").addEventListener("wheel", e => {
   if (Math.abs(e.deltaX) <= Math.abs(e.deltaY)) return;
@@ -1627,10 +1629,10 @@ $("hero").addEventListener("wheel", e => {
   else if (wacc < -60){ setPeriod(pi - 1); wlock = now + 450; wacc = 0; }
 }, {passive: false});
 
-/* ------------------------------------------------ статичные карточки */
+/* ------------------------------------------------ static cards */
 const CARD_DEFS = [
-  ["сегодня", "cToday"], ["прогноз на месяц", "cFc"],
-  ["кэш сэкономил", "cSaved"], ["в среднем за день", "cAvg"],
+  ["today", "cToday"], ["month forecast", "cFc"],
+  ["cache saved", "cSaved"], ["average day", "cAvg"],
 ];
 const cardRef = {};
 for (const [lbl, key] of CARD_DEFS){
@@ -1642,8 +1644,8 @@ for (const [lbl, key] of CARD_DEFS){
   $("cards").appendChild(d);
 }
 
-/* ------------------------------------------------ рендер */
-const WD = ["пн","вт","ср","чт","пт","сб","вс"];
+/* ------------------------------------------------ render */
+const WD = ["mo","tu","we","th","fr","sa","su"];
 let lastSig = null;
 const R = {days: [], grid: [], heat: [], models: [], chats: [], tools: [], hours: [], year: []};
 
@@ -1665,7 +1667,7 @@ function floater(delta){
   setTimeout(() => bc.classList.remove("burn"), 900);
 }
 
-function stag(el, i, ms){                     // каскадное появление строк
+function stag(el, i, ms){                     // staggered row entrance
   if (reduced) return;
   el.style.animation = "rowin .38s both " + Math.min(i * ms, 500) + "ms";
 }
@@ -1674,7 +1676,7 @@ function render(d, fresh){
   const t = d.total;
   if (!t){
     document.body.classList.add("nodata");
-    $("herosub").textContent = "нет данных за период";
+    $("herosub").textContent = "no data for this period";
     $("bignum").textContent = "$0.00"; $("bignum").dataset.v = 0;
     const eb = $("emptybox");
     eb.hidden = false;
@@ -1685,14 +1687,14 @@ function render(d, fresh){
       eb.appendChild(el);
     };
     if (d.have_any){
-      line("e1", "за этот период активности не было");
-      line("e2", "переключи период: ← → или свайп по счётчику");
+      line("e1", "no activity in this period");
+      line("e2", "switch periods: ← → or swipe over the counter");
     } else {
-      line("e1", "данные Claude Code не найдены");
-      line("e2", "смотрел в: " + (d.root || "~/.claude/projects"));
-      line("e2", "если Claude Code живёт в WSL — запусти с переменной " +
+      line("e1", "no Claude Code data found");
+      line("e2", "looked in: " + (d.root || "~/.claude/projects"));
+      line("e2", "if Claude Code lives in WSL, set " +
                  "CCOST_ROOT=\\wsl.localhost\Ubuntu\home\<user>\.claude\projects " +
-                 "или используй ccost-linux внутри WSL");
+                 "or run ccost-linux inside WSL");
     }
     for (const id of ["daychart","heat","models","chats","tools","hourchart"])
       $(id).replaceChildren();
@@ -1701,7 +1703,7 @@ function render(d, fresh){
   }
   document.body.classList.remove("nodata");
   $("emptybox").hidden = true;
-  /* герой + живые «+$» тики */
+  /* hero + live "+$" ticks */
   const prev = +$("bignum").dataset.v || 0;
   if (!fresh && prev > 0 && t.cost > prev + 0.004 && !reduced)
     floater(t.cost - prev);
@@ -1714,31 +1716,31 @@ function render(d, fresh){
     const b = document.createElement(strong ? "b" : "span");
     b.textContent = txt; hs.appendChild(b);
   };
-  seg(htok(t.tok)); seg(" токенов · "); seg(t.msgs.toLocaleString("ru-RU"));
-  seg(" сообщений · "); seg(String(t.sessions)); seg(" чатов · ");
-  if (d.day){ seg("день "); seg(d.day, true); }
-  else { seg(t.first + " … " + t.last); seg(" · стрик "); seg(t.streak + " дн.", true); }
+  seg(htok(t.tok)); seg(" tokens · "); seg(t.msgs.toLocaleString("en-US"));
+  seg(" messages · "); seg(String(t.sessions)); seg(" chats · ");
+  if (d.day){ seg("day "); seg(d.day, true); }
+  else { seg(t.first + " … " + t.last); seg(" · streak "); seg(t.streak + " days", true); }
 
   const w = $("warn");
   if (d.unknown.length){
     w.hidden = false;
-    w.textContent = "нет прайса (стоимость = $0): " + d.unknown.join(", ");
+    w.textContent = "no price (counted as $0): " + d.unknown.join(", ");
   } else w.hidden = true;
 
-  /* карточки */
+  /* cards */
   lerpMoney(cardRef.cToday.val, t.today, fresh);
-  cardRef.cToday.sub.textContent = "за последний час " + money(t.hour_cost);
+  cardRef.cToday.sub.textContent = "last hour " + money(t.hour_cost);
   lerpMoney(cardRef.cFc.val, t.forecast, fresh);
-  cardRef.cFc.sub.textContent = "факт " + money(t.mtd);
+  cardRef.cFc.sub.textContent = "so far " + money(t.mtd);
   lerpMoney(cardRef.cSaved.val, t.saved, fresh);
-  cardRef.cSaved.sub.textContent = "без кэша ≈ " + money(t.cost + t.saved);
+  cardRef.cSaved.sub.textContent = "without cache ≈ " + money(t.cost + t.saved);
   lerpMoney(cardRef.cAvg.val, t.avg_day, fresh);
-  cardRef.cAvg.sub.textContent = "пик " + t.busiest_day + " · " + money(t.busiest_cost);
+  cardRef.cAvg.sub.textContent = "peak " + t.busiest_day + " · " + money(t.busiest_cost);
 
   const up = $("upd");
   if (d.update){
     up.hidden = false;
-    up.textContent = "вышла " + d.update.tag;
+    up.textContent = d.update.tag + " is out";
     up.href = d.update.url;
   } else up.hidden = true;
 
@@ -1752,7 +1754,7 @@ function render(d, fresh){
   renderRecs(d, fresh);
 }
 
-const MONTHS = ["янв","фев","мар","апр","май","июн","июл","авг","сен","окт","ноя","дек"];
+const MONTHS = ["jan","feb","mar","apr","may","jun","jul","aug","sep","oct","nov","dec"];
 function gotoDay(day){
   if (period !== 0){
     pi = 0; period = 0;
@@ -1766,7 +1768,7 @@ function renderYear(d, fresh){
   if (!y.length) return;
   const mx = Math.max(...y.map(x => x.c), 0.01);
   const first = new Date(y[0].d + "T00:00:00");
-  const pad = (first.getDay() + 6) % 7;         // пн = 0
+  const pad = (first.getDay() + 6) % 7;         // monday = 0
   if (fresh || R.year.length !== y.length){
     const box = $("year");
     box.replaceChildren();
@@ -1869,7 +1871,7 @@ function setDayBar(b, x, mx, today){
   b.classList.toggle("sel", x.d === selDay);
   b._day = x.d;
   b._tip = esc(x.d) + " · <b>" + money(x.c) + "</b>" +
-           (x.d === selDay ? "" : " · клик — детали дня");
+           (x.d === selDay ? "" : " · click for day details");
 }
 
 function renderHeat(d, fresh){
@@ -1884,7 +1886,7 @@ function renderHeat(d, fresh){
     R.heat = [];
     d.heat.forEach((row,i) => row.forEach((v,j) => {
       const c = document.createElement("i");
-      if (!reduced){                          // скан-развёртка слева направо
+      if (!reduced){                          // left-to-right scan sweep
         c.style.opacity = "0";
         c.style.transitionDelay = (j*14 + i*6) + "ms";
       }
@@ -1953,7 +1955,7 @@ function renderChats(d, fresh){
     lerpMoney(r.children[1], c.cost, fresh);
     const meta = r.children[2];
     meta.replaceChildren();
-    for (const chip of [c.project, c.model, c.msgs.toLocaleString("ru-RU")+" сообщ."]){
+    for (const chip of [c.project, c.model, c.msgs.toLocaleString("en-US")+" msgs"]){
       const s = document.createElement("span");
       s.className = "chip"; s.textContent = chip;
       meta.appendChild(s);
@@ -2013,12 +2015,12 @@ function renderHours(d, fresh){
 }
 function setHourBar(b, x, i, mx){
   b.style.height = Math.max(x.c/mx*100, x.c > 0 ? 2 : 0.6) + "%";
-  b._tip = String(i).padStart(2,"0") + ":00 · <b>" + money(x.c) + "</b> · " + x.m + " сообщ.";
+  b._tip = String(i).padStart(2,"0") + ":00 · <b>" + money(x.c) + "</b> · " + x.m + " msgs";
 }
 
-/* ------------------------------------------------ live-цикл */
+/* ------------------------------------------------ live loop */
 function renderLoading(l){
-  $("herosub").textContent = "читаю сессии… " + l.done + " / " + l.total + " файлов";
+  $("herosub").textContent = "reading sessions… " + l.done + " / " + l.total + " files";
   const lb = $("loadbar");
   lb.hidden = false;
   lb.firstElementChild.style.width = (l.total ? l.done / l.total * 100 : 0) + "%";
@@ -2030,7 +2032,7 @@ async function tick(force){
     if (d.loading){
       renderLoading(d.loading);
       $("livedot").classList.remove("off");
-      $("livelbl").textContent = "загрузка";
+      $("livelbl").textContent = "loading";
       mainEl.classList.remove("dim");
       setTimeout(() => tick(true), 400);
       return;
@@ -2045,18 +2047,18 @@ async function tick(force){
     document.body.classList.remove("offline");
   }catch(e){
     $("livedot").classList.add("off");
-    $("livelbl").textContent = "нет связи";
+    $("livelbl").textContent = "offline";
     $("conn").hidden = false;
     document.body.classList.add("offline");
   }
   mainEl.classList.remove("dim");
 }
-/* --------------------------------------- своя рамка окна (mac / windows) */
+/* --------------------------------------- custom window chrome (mac / windows) */
 (function chrome(){
   const header = document.querySelector("header");
   const wk = window.webkit && window.webkit.messageHandlers
           && window.webkit.messageHandlers.ccost;
-  if (wk){                                    // ccost.app: drag через performDrag
+  if (wk){                                    // ccost.app: drag via performDrag
     document.body.classList.add("chrome-mac");
     header.addEventListener("mousedown", e => {
       if (e.target.closest("button, nav, a")) return;
@@ -2067,7 +2069,7 @@ async function tick(force){
       wk.postMessage("zoom");
     });
   }
-  addEventListener("pywebviewready", () => {  // Windows: frameless + свои кнопки
+  addEventListener("pywebviewready", () => {  // Windows: frameless + custom buttons
     document.body.classList.add("chrome-win");
     const strip = document.createElement("div");
     strip.className = "pywebview-drag-region";
@@ -2087,7 +2089,7 @@ async function tick(force){
     moveThumb();
   });
 })();
-/* --------------------------------------------- настройки (конфиг-панель) */
+/* --------------------------------------------- settings drawer */
 let cfgCache = null;
 let timer = null;
 function setRefresh(ms){
@@ -2119,7 +2121,7 @@ function renderCfg(){
     e.className = "cfg-h"; e.textContent = t;
     body.appendChild(e);
   };
-  head("источники");
+  head("sources");
   for (const [key, name] of [["claude","Claude Code"],["codex","Codex · OpenAI"]]){
     const m = meta[key];
     const row = document.createElement("label");
@@ -2137,8 +2139,8 @@ function renderCfg(){
     const n2 = document.createElement("div");
     n2.className = "dim2";
     n2.textContent = m.files
-      ? m.files + " файлов · " + m.records.toLocaleString("ru-RU") + " записей"
-      : "не найдено";
+      ? m.files + " files · " + m.records.toLocaleString("en-US") + " records"
+      : "not found";
     const n3 = document.createElement("div");
     n3.className = "dim2";
     n3.textContent = m.root;
@@ -2146,15 +2148,15 @@ function renderCfg(){
     row.append(cb, tgl, info);
     body.appendChild(row);
   }
-  head("обновление");
-  body.appendChild(chipRow([["2 с",2000],["5 с",5000],["10 с",10000]],
+  head("refresh");
+  body.appendChild(chipRow([["2 s",2000],["5 s",5000],["10 s",10000]],
                            c.refresh_ms, v => postCfg({refresh_ms: v})));
-  head("период при старте");
+  head("default period");
   body.appendChild(chipRow(PERIODS.map(p => [p[0], p[1]]),
                            c.default_period, v => postCfg({default_period: v})));
-  head("приложение");
-  for (const [key, label] of [["menubar","счётчик в menu bar (мак)"],
-                              ["check_updates","проверять обновления"]]){
+  head("app");
+  for (const [key, label] of [["menubar","menu bar counter (mac)"],
+                              ["check_updates","check for updates"]]){
     const row = document.createElement("label");
     row.className = "srcrow";
     const cb = document.createElement("input");
@@ -2171,7 +2173,7 @@ function renderCfg(){
     row.append(cb, tgl, info);
     body.appendChild(row);
   }
-  head("прайс · $ за 1M токенов");
+  head("prices · $ per 1M tokens");
   const defaults = {};
   for (const [n, p] of Object.entries(cfgCache.prices.anthropic))
     defaults[n] = [p[0], p[1]];
@@ -2181,7 +2183,7 @@ function renderCfg(){
   const inputs = {};
   const tbl = document.createElement("div");
   tbl.className = "pricetbl";
-  for (const t of ["модель", "in", "out"]){
+  for (const t of ["model", "in", "out"]){
     const e = document.createElement("div");
     e.className = "ph"; e.textContent = t;
     tbl.appendChild(e);
@@ -2215,14 +2217,14 @@ function renderCfg(){
   body.appendChild(tbl);
   const note = document.createElement("div");
   note.className = "cfg-note";
-  note.textContent = "правь цифры — пересчёт всей истории мгновенный; " +
-                     "бирюзовая модель = своя цена";
+  note.textContent = "edit a number to reprice the whole history instantly; " +
+                     "teal model = custom price";
   body.appendChild(note);
   if (Object.keys(ov).length){
     const rb = document.createElement("button");
     rb.className = "chipbtn";
     rb.style.marginTop = "10px";
-    rb.textContent = "сбросить цены к прайсу";
+    rb.textContent = "reset to list prices";
     rb.onclick = () => postCfg({prices: {}});
     body.appendChild(rb);
   }
@@ -2243,7 +2245,7 @@ $("gear").onclick = () => {
   $("shade").hidden = false;
   document.body.classList.add("cfgopen");
   fetchCfg().then(renderCfg)
-    .catch(() => { $("cfgbody").textContent = "не удалось получить конфиг"; });
+    .catch(() => { $("cfgbody").textContent = "failed to load config"; });
 };
 $("shade").onclick = closeDrawer;
 
@@ -2272,8 +2274,8 @@ addEventListener("load", moveThumb);
 
 
 def find_app_browser():
-    """Chromium-совместимый браузер для оконного режима (--app=URL):
-    на Windows Edge есть всегда, на Linux ищем chromium/chrome/brave."""
+    """Chromium-compatible browser for window mode (--app=URL): Edge is
+    always present on Windows; on Linux try chromium/chrome/brave."""
     if sys.platform == "darwin":
         cands = [
             "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
@@ -2304,12 +2306,12 @@ def find_app_browser():
 
 
 def _gui_server(co, port=0):
-    """Собирает HTTP-сервер дашборда (не запускает serve_forever)."""
+    """Builds the dashboard HTTP server (does not call serve_forever)."""
     from http.server import BaseHTTPRequestHandler, HTTPServer
     from urllib.parse import urlparse, parse_qs
     import threading
 
-    # первый скан — в фоне: окно открывается сразу и показывает прогресс
+    # first scan runs in the background: the window opens immediately with progress
     lock = threading.Lock()
     ready = threading.Event()
 
@@ -2436,11 +2438,11 @@ def serve_gui(co, port=0, open_browser=True, app_browser=None):
     import webbrowser
 
     srv, url = _gui_server(co, port)
-    # flush обязателен: ccost.app читает URL из пайпа
-    print(f"ccost gui: {url}  (Ctrl-C — выход)", flush=True)
+    # flush is required: ccost.app reads the URL from the pipe
+    print(f"ccost gui: {url}  (Ctrl-C to stop)", flush=True)
     if app_browser:
-        # оконный режим: отдельный профиль, иначе хром вливается в уже
-        # запущенный процесс и выходит сразу — не отследить закрытие окна
+        # window mode: separate profile, otherwise chrome joins an existing
+        # process and exits immediately — the window close cannot be tracked
         import subprocess
         prof = os.path.join(os.path.expanduser("~"), ".cache", "ccost-webapp")
         os.makedirs(prof, exist_ok=True)
@@ -2463,9 +2465,9 @@ def serve_gui(co, port=0, open_browser=True, app_browser=None):
 
 
 def native_window(co, port=0):
-    """Нативное окно через pywebview (в Windows-бинарник он вшит):
-    на Windows — frameless, рамку и кнопки «— ▢ ✕» рисует сам дашборд.
-    False — pywebview недоступен, зовущий уходит на запасной вариант."""
+    """Native window via pywebview (bundled into the Windows binary): frameless
+    on Windows, the dashboard draws its own chrome and window buttons.
+    False — pywebview unavailable, caller falls back."""
     try:
         import webview
     except ImportError:
@@ -2503,8 +2505,8 @@ def native_window(co, port=0):
 
 # ---------------------------------------------------------------- TUI (curses)
 
-TABS = ["Обзор", "Модели", "Дни", "Чаты", "Проекты", "Тулзы", "Часы", "Неделя"]
-WDAYS = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"]
+TABS = ["Overview", "Models", "Days", "Chats", "Projects", "Tools", "Hours", "Week"]
+WDAYS = ["mo", "tu", "we", "th", "fr", "sa", "su"]
 TABLE_TABS = (1, 2, 3, 4, 5)
 
 
@@ -2515,10 +2517,10 @@ class App:
         self.period = 0
         self.sortkey = "cost"          # cost | tok
         self.sel = [0] * len(TABS)
-        self.detail = None             # (tab, key) — открытая карточка
-        self.live = True               # автообновление каждые ~2 c
-        self._off = 0                  # прокрутка текущей таблицы (для мыши)
-        self._tab_spans = []           # x-диапазоны вкладок (для мыши)
+        self.detail = None             # (tab, key) — open details card
+        self.live = True               # auto-refresh every ~2 s
+        self._off = 0                  # current table scroll offset (for mouse)
+        self._tab_spans = []           # tab x-ranges (for mouse)
         self.recompute()
 
     def recompute(self):
@@ -2547,7 +2549,7 @@ class App:
         if tab == 1:
             return self.sorted_rows(self.ag_models)
         if tab == 2:
-            return sorted(self.ag_days.items())          # по дате
+            return sorted(self.ag_days.items())          # by date
         if tab == 3:
             return self.sorted_rows(self.ag_chats)
         if tab == 4:
@@ -2560,13 +2562,13 @@ class App:
             return [(hh, self.ag_hours.get(hh)) for hh in range(24)]
         return []
 
-    # ------------------------------------------------------------ цикл
+    # ------------------------------------------------------------ loop
     def run(self, scr):
         curses.curs_set(0)
-        scr.timeout(2000)              # тик live-режима
+        scr.timeout(2000)              # live mode tick
         try:
             curses.mousemask(curses.ALL_MOUSE_EVENTS)
-        except (curses.error, AttributeError):   # PDCurses может не уметь
+        except (curses.error, AttributeError):   # PDCurses may lack this
             pass
         self._init_colors()
         while True:
@@ -2579,7 +2581,7 @@ class App:
                     self.recompute()
                     ch = -1
                     break
-            if ch == -1:               # live-тик с новыми данными
+            if ch == -1:               # live tick with new data
                 continue
             if ch == ord("r"):
                 self.reload(scr)
@@ -2592,7 +2594,7 @@ class App:
 
     def reload(self, scr):
         maxy, maxx = scr.getmaxyx()
-        self.add(scr, maxy - 1, 1, "перечитываю всё с нуля…".ljust(maxx - 2),
+        self.add(scr, maxy - 1, 1, "re-reading everything…".ljust(maxx - 2),
                  self.c["head"])
         scr.refresh()
         self.co = Collector()
@@ -2600,13 +2602,13 @@ class App:
         self.recompute()
 
     def _init_colors(self):
-        # Роли: dim (второстепенный текст), head (заголовки), money ($),
-        # bar (графики), tab (активная вкладка). Значение каждой роли — готовый
-        # curses-атрибут, который можно | с A_REVERSE и т.п.
+        # Roles: dim (secondary text), head (headings), money ($), bar
+        # (charts), tab (active tab). Each role value is a ready curses
+        # attribute that can be |-ed with A_REVERSE etc.
         self.c = defaultdict(int)
         no_color = os.environ.get("NO_COLOR") is not None
         if no_color or not curses.has_colors():
-            # без цвета — держим структуру на атрибутах
+            # no color — keep structure with attributes
             self.c["dim"] = curses.A_DIM
             self.c["head"] = curses.A_BOLD
             self.c["money"] = curses.A_BOLD
@@ -2616,23 +2618,23 @@ class App:
             return
         curses.start_color()
         try:
-            curses.use_default_colors()   # фон = родной фон терминала
+            curses.use_default_colors()   # background = the terminal's own
             bg = -1
         except (curses.error, AttributeError):
             bg = curses.COLOR_BLACK
         ncolors = getattr(curses, "COLORS", 8)
         if ncolors >= 256:
-            # аккуратные оттенки, читаемые и на тёмном, и на светлом фоне
+            # careful shades, readable on both dark and light backgrounds
             specs = [
-                ("dim",   245, bg, 0),                 # серый, а не синий
-                ("head",  179, bg, curses.A_BOLD),     # тёпло-жёлтый
-                ("money", 71,  bg, 0),                 # зелёный
-                ("bar",   37,  bg, 0),                 # бирюзовый
-                ("tab",   16,  37, curses.A_BOLD),     # тёмный на бирюзе
-                ("sel",   231, 24, curses.A_BOLD),     # выделение: белый на синем
+                ("dim",   245, bg, 0),                 # gray, not blue
+                ("head",  179, bg, curses.A_BOLD),     # warm yellow
+                ("money", 71,  bg, 0),                 # green
+                ("bar",   37,  bg, 0),                 # teal
+                ("tab",   16,  37, curses.A_BOLD),     # dark on teal
+                ("sel",   231, 24, curses.A_BOLD),     # selection: white on blue
             ]
         else:
-            # 8/16 цветов: серого нет — берём белый + A_DIM
+            # 8/16 colors: no gray — use white + A_DIM
             specs = [
                 ("dim",   curses.COLOR_WHITE,  bg, curses.A_DIM),
                 ("head",  curses.COLOR_YELLOW, bg, curses.A_BOLD),
@@ -2647,7 +2649,7 @@ class App:
                 self.c[name] = curses.color_pair(i) | extra
             except curses.error:
                 self.c[name] = extra
-        # если пары не создались — держим читаемость через инверсию
+        # if pairs failed, keep readability via reverse video
         if not self.c["tab"]:
             self.c["tab"] = curses.A_REVERSE | curses.A_BOLD
         if not self.c["sel"]:
@@ -2689,7 +2691,7 @@ class App:
         elif ch in (curses.KEY_HOME, ord("g")):
             self.sel[self.tab] = 0
         elif ch in (curses.KEY_END, ord("G")):
-            self.sel[self.tab] = 10 ** 9      # прижмётся в draw_table
+            self.sel[self.tab] = 10 ** 9      # clamped in draw_table
         elif ch in (curses.KEY_ENTER, 10, 13) and self.tab in TABLE_TABS:
             rows = self.rows_for(self.tab)
             if rows:
@@ -2711,29 +2713,29 @@ class App:
         except curses.error:
             return
         b5 = getattr(curses, "BUTTON5_PRESSED", 0x200000)
-        if bs & curses.BUTTON4_PRESSED:                       # колесо вверх
+        if bs & curses.BUTTON4_PRESSED:                       # wheel up
             self.sel[self.tab] = max(0, self.sel[self.tab] - 3)
             return
-        if bs & b5:                                           # колесо вниз
+        if bs & b5:                                           # wheel down
             self.sel[self.tab] += 3
             return
         if not bs & (curses.BUTTON1_CLICKED | curses.BUTTON1_PRESSED
                      | curses.BUTTON1_DOUBLE_CLICKED):
             return
-        if my == 1:                                           # клик по вкладке
+        if my == 1:                                           # tab click
             for i, (x0, x1) in enumerate(self._tab_spans):
                 if x0 <= mx < x1:
                     self.tab = i
                     return
             return
-        if my >= 4 and self.tab in TABLE_TABS:                # клик по строке
+        if my >= 4 and self.tab in TABLE_TABS:                # row click
             rows = self.rows_for(self.tab)
             idx = self._off + (my - 4)
             if 0 <= idx < len(rows):
                 if idx == self.sel[self.tab] \
                         or bs & curses.BUTTON1_DOUBLE_CLICKED:
                     self.sel[self.tab] = idx
-                    self.detail = (self.tab, rows[idx][0])    # второй клик = карточка
+                    self.detail = (self.tab, rows[idx][0])    # second click = details
                 else:
                     self.sel[self.tab] = idx
 
@@ -2745,7 +2747,7 @@ class App:
         try:
             scr.addstr(y, x, s, attr)
         except (curses.error, UnicodeEncodeError):
-            pass                           # край экрана / не-юникодная консоль
+            pass                           # screen edge / non-unicode console
 
     def draw(self, scr):
         scr.erase()
@@ -2757,10 +2759,10 @@ class App:
         if self.live:
             self.add(scr, 0, 7, "live", self.c["money"])
         else:
-            self.add(scr, 0, 7, "пауза", self.c["dim"] | curses.A_REVERSE)
-        right = f"{toks} токенов · {cost} · период: {PERIODS[self.period]}"
+            self.add(scr, 0, 7, "paused", self.c["dim"] | curses.A_REVERSE)
+        right = f"{toks} tokens · {cost} · period: {PERIODS[self.period]}"
         self.add(scr, 0, max(14, maxx - len(right) - 2), right, self.c["dim"])
-        # вкладки
+        # tabs
         x = 1
         self._tab_spans = []
         for i, name in enumerate(TABS):
@@ -2774,7 +2776,7 @@ class App:
         body_h = maxy - body_top - 1
         if not head:
             self.add(scr, body_top + 1, 2,
-                     "нет данных за период «%s»" % PERIODS[self.period])
+                     "no data for period '%s'" % PERIODS[self.period])
         elif self.tab == 0:
             self.draw_overview(scr, body_top, body_h, maxx)
         elif self.tab == 5:
@@ -2787,10 +2789,10 @@ class App:
             self.draw_table(scr, body_top, body_h, maxx)
         if self.detail is not None:
             self.draw_detail(scr, maxy, maxx)
-            foot = "Esc/Enter/клик — закрыть карточку"
+            foot = "Esc/Enter/click closes the card"
         else:
-            foot = ("1-8 · ↑↓ · Enter карточка · f период · s сорт(%s) · "
-                    "p live · r перечитать · q выход" % self.sortkey)
+            foot = ("1-8 · ↑↓ · Enter details · f period · s sort(%s) · "
+                    "p live · r reload · q quit" % self.sortkey)
         self.add(scr, maxy - 1, 1, foot, self.c["dim"])
         scr.refresh()
 
@@ -2798,42 +2800,42 @@ class App:
         o = self.ov
         y = top + 1
         self.add(scr, y, 2, money(o["cost"]), self.c["money"] | curses.A_BOLD)
-        self.add(scr, y, 16, f"{o['tok']:,} токенов", curses.A_BOLD)
+        self.add(scr, y, 16, f"{o['tok']:,} tokens", curses.A_BOLD)
         y += 2
         peak = f"{o['peak_hour'][0]:02d}:00" if o["peak_hour"][0] >= 0 else "—"
         lines = [
-            ("сообщений", f"{o['msgs']:,}"),
-            ("чатов", f"{o['sessions']:,}"),
-            ("активных дней", f"{o['ndays']}  ({o['first']} … {o['last']}) · "
-                              f"стрик {o['streak']} дн."),
-            ("в среднем / день", money(o["avg_day"])),
-            ("сегодня", f"{money(o['today'])} · за час {money(o['hour_cost'])}"),
-            ("прогноз на месяц", f"{money(o['forecast'])} (факт {money(o['mtd'])})"),
-            ("пик дня", f"{o['busiest_day'][0]}  ({money(o['busiest_day'][1]['cost'])})"),
-            ("пик часа", peak),
-            ("топ-модель", o["top_model"][0].replace("claude-", "")),
-            ("кэш-чтения", f"{o['cache_share']:.1f}% всех токенов"),
-            ("кэш сэкономил", f"≈ {money(o['saved'])} "
-                              f"(без кэша ≈ {money(o['cost'] + o['saved'])})"),
+            ("messages", f"{o['msgs']:,}"),
+            ("chats", f"{o['sessions']:,}"),
+            ("active days", f"{o['ndays']}  ({o['first']} … {o['last']}) · "
+                            f"streak {o['streak']} days"),
+            ("average / day", money(o["avg_day"])),
+            ("today", f"{money(o['today'])} · last hour {money(o['hour_cost'])}"),
+            ("month forecast", f"{money(o['forecast'])} (so far {money(o['mtd'])})"),
+            ("peak day", f"{o['busiest_day'][0]}  ({money(o['busiest_day'][1]['cost'])})"),
+            ("peak hour", peak),
+            ("top model", o["top_model"][0].replace("claude-", "")),
+            ("cache reads", f"{o['cache_share']:.1f}% of all tokens"),
+            ("cache saved", f"≈ {money(o['saved'])} "
+                            f"(without cache ≈ {money(o['cost'] + o['saved'])})"),
         ]
         for name, val in lines:
             self.add(scr, y, 2, f"{name:>18} :", self.c["dim"])
             self.add(scr, y, 23, val)
             y += 1
         y += 1
-        self.add(scr, y, 2, "токены:", self.c["head"])
+        self.add(scr, y, 2, "tokens:", self.c["head"])
         self.add(scr, y, 12,
                  f"input {h(o['tin'])} · cache-wr {h(o['cw'])} · "
                  f"cache-rd {h(o['cr'])} · output {h(o['tout'])}")
         y += 1
         if self.co.unknown:
             self.add(scr, y, 2,
-                     "нет прайса (стоимость = $0): "
+                     "no price (counted as $0): "
                      + ", ".join(sorted(self.co.unknown)),
                      self.c["head"])
             y += 1
         y += 1
-        self.add(scr, y, 2, "стоимость по дням:", self.c["head"])
+        self.add(scr, y, 2, "cost by day:", self.c["head"])
         y += 1
         seq = fill_days(self.ag_days)
         if seq:
@@ -2843,7 +2845,7 @@ class App:
             self.add(scr, y, 2, sparkline(vals, width), self.c["bar"])
             y += 1
             self.add(scr, y, 2,
-                     f"{shown[0][0]}  →  {shown[-1][0]}   макс ${max(vals):.2f}/день",
+                     f"{shown[0][0]}  →  {shown[-1][0]}   max ${max(vals):.2f}/day",
                      self.c["dim"])
 
     def draw_table(self, scr, top, h_, maxx):
@@ -2851,19 +2853,19 @@ class App:
         sel = self.sel[self.tab] = min(self.sel[self.tab], max(0, len(rows) - 1))
         off = self._off = window(sel, len(rows), h_ - 1)
         mx = max((tok(a) for _, a in rows), default=1) or 1
-        title = {1: "модель", 2: "день", 3: "чат", 4: "проект"}[self.tab]
+        title = {1: "model", 2: "day", 3: "chat", 4: "project"}[self.tab]
         self.add(scr, top, 2, title, self.c["head"])
         self.add(scr, top, maxx - 37, f"{'input':>6}{'cache':>7}{'out':>7}",
                  self.c["head"] | curses.A_DIM)
         self.add(scr, top, maxx - 12, "$", self.c["head"])
         namew = max(12, maxx - 55)
         bx = 2 + namew + 1
-        bw = max(0, min(12, maxx - 38 - bx))   # не наезжать на числа в узком окне
+        bw = max(0, min(12, maxx - 38 - bx))   # keep clear of numbers when narrow
         for i in range(off, min(len(rows), off + h_ - 1)):
             k, a = rows[i]
             y = top + 1 + (i - off)
             selected = i == sel
-            if selected:                         # сплошная подсветка на всю ширину
+            if selected:                         # full-width highlight
                 self.add(scr, y, 1, " " * (maxx - 2), self.c["sel"])
             a_txt = self.c["sel"] if selected else 0
             a_bar = self.c["sel"] if selected else self.c["bar"]
@@ -2887,13 +2889,13 @@ class App:
     def draw_tools(self, scr, top, h_, maxx):
         rows = self.rows_for(5)
         if not rows:
-            self.add(scr, top + 1, 2, "вызовов инструментов не найдено")
+            self.add(scr, top + 1, 2, "no tool calls found")
             return
         sel = self.sel[5] = min(self.sel[5], len(rows) - 1)
         off = self._off = window(sel, len(rows), h_ - 1)
         mx = max(a["calls"] for _, a in rows) or 1
-        self.add(scr, top, 2, "инструмент", self.c["head"])
-        self.add(scr, top, maxx - 41, f"{'вызовы':>8}{'сообщ.':>9}",
+        self.add(scr, top, 2, "tool", self.c["head"])
+        self.add(scr, top, maxx - 41, f"{'calls':>8}{'msgs':>9}",
                  self.c["head"] | curses.A_DIM)
         self.add(scr, top, maxx - 13, "$≈", self.c["head"])
         namew = max(12, maxx - 59)
@@ -2918,7 +2920,7 @@ class App:
             self.add(scr, top, maxx - 51, f"[{sel + 1}/{len(rows)}]", self.c["dim"])
 
     def draw_hours(self, scr, top, h_, maxx):
-        self.add(scr, top, 2, "активность по часам (локальное время)", self.c["head"])
+        self.add(scr, top, 2, "activity by hour (local time)", self.c["head"])
         mxc = max((a["cost"] for a in self.ag_hours.values()), default=1) or 1
         bw = max(10, maxx - 30)
         for hh in range(24):
@@ -2933,7 +2935,7 @@ class App:
             self.add(scr, y, maxx - 20, f"{msgs:>5} msg {money(c):>9}", self.c["money"])
 
     def draw_heat(self, scr, top, h_, maxx):
-        self.add(scr, top, 2, "стоимость по дням недели и часам (локальное время)",
+        self.add(scr, top, 2, "cost by weekday and hour (local time)",
                  self.c["head"])
         heat = self.ag_heat
         mx = max(heat.values(), default=0) or 1
@@ -2957,10 +2959,10 @@ class App:
         y = top + 11
         if y < top + h_:
             self.add(scr, y, 2,
-                     f"ячейка = час недели · {FULL} = {money(mx)} (макс за час)",
+                     f"cell = one hour of the week · {FULL} = {money(mx)} (max/hour)",
                      self.c["dim"])
 
-    # ------------------------------------------------------------ карточка
+    # ------------------------------------------------------------ details card
     def _detail_records(self, tab, key):
         if tab == 5:
             return [r for r in self.f if key in r.tools]
@@ -2973,11 +2975,11 @@ class App:
         if not sub:
             self.detail = None
             return
-        kind = {1: "модель", 2: "день", 3: "чат", 4: "проект", 5: "инструмент"}[tab]
+        kind = {1: "model", 2: "day", 3: "chat", 4: "project", 5: "tool"}[tab]
         if tab == 1:
             name = key.replace("claude-", "")
         elif tab == 3:
-            name = self.co.titles.get(key) or "(без названия)"
+            name = self.co.titles.get(key) or "(untitled)"
         else:
             name = key
         total = sum(r.cost for r in sub)
@@ -2990,41 +2992,41 @@ class App:
 
         w = min(maxx - 4, 74)
         inner = w - 4
-        lines = []                      # (текст, роль)
+        lines = []                      # (text, role)
         for part in textwrap.wrap(name, inner)[:2] or [name[:inner]]:
             lines.append((part, "head"))
         if tab == 3:
-            lines.append((f"id {str(key)[:8]} · проект {sub[0].project}", "dim"))
+            lines.append((f"id {str(key)[:8]} · project {sub[0].project}", "dim"))
         else:
             ns = len({r.session for r in sub})
-            lines.append((f"чатов: {ns}", "dim"))
+            lines.append((f"chats: {ns}", "dim"))
         lines.append(("", ""))
         if tab == 5:
             calls = sum(r.tools.count(key) for r in sub)
-            lines.append((f"{calls:,} вызовов · {len(sub):,} сообщений · "
-                          f"{money(total)} в этих сообщениях", "money"))
+            lines.append((f"{calls:,} calls · {len(sub):,} messages · "
+                          f"{money(total)} in those messages", "money"))
         else:
-            lines.append((f"{money(total)} · {len(sub):,} сообщений · "
-                          f"{money(total / len(sub))}/сообщение", "money"))
+            lines.append((f"{money(total)} · {len(sub):,} messages · "
+                          f"{money(total / len(sub))}/message", "money"))
         if ts:
             t0, t1 = min(ts), max(ts)
             if tab == 3:
                 dur = t1 - t0
-                dtxt = f"{dur / 3600:.1f} ч" if dur >= 3600 else f"{dur / 60:.0f} мин"
+                dtxt = f"{dur / 3600:.1f} h" if dur >= 3600 else f"{dur / 60:.0f} min"
                 lines.append((f"{fmt_dt(t0)} … {fmt_dt(t1)}  ({dtxt})", ""))
             elif days:
-                lines.append((f"активность: {min(days)} … {max(days)} "
-                              f"({len(days)} дн.)", ""))
-        lines.append((f"токены: input {h(tin)} · cache-wr {h(cw)} · "
+                lines.append((f"active: {min(days)} … {max(days)} "
+                              f"({len(days)} days)", ""))
+        lines.append((f"tokens: input {h(tin)} · cache-wr {h(cw)} · "
                       f"cache-rd {h(cr)} · output {h(tout)}", "dim"))
         lines.append(("", ""))
         if tab == 3:
             agg = aggregate(sub, lambda r: r.model)
-            lines.append(("модели:", "head"))
+            lines.append(("models:", "head"))
             namef = lambda k: k.replace("claude-", "")
         else:
             agg = aggregate(sub, lambda r: r.session)
-            lines.append(("топ-чаты:", "head"))
+            lines.append(("top chats:", "head"))
             namef = lambda k: self.co.titles.get(k) or "(" + str(k)[:8] + ")"
         rows = sorted(agg.items(), key=lambda kv: -kv[1]["cost"])[:5]
         mxc = rows[0][1]["cost"] or 1 if rows else 1
@@ -3060,8 +3062,8 @@ def window(sel, n, h_):
 # ---------------------------------------------------------------- main
 
 def _codeset():
-    # реальный codeset LC_CTYPE — именно его смотрит ncurses (в отличие от
-    # getpreferredencoding, который на macOS врёт «UTF-8» даже под локалью C)
+    # the real LC_CTYPE codeset — this is what ncurses consults (unlike
+    # getpreferredencoding, which on macOS claims UTF-8 even under the C locale)
     try:
         return (locale.nl_langinfo(locale.CODESET) or "").upper()
     except (AttributeError, ValueError):
@@ -3069,8 +3071,8 @@ def _codeset():
 
 
 def setup_output():
-    """Локаль ставим ДО curses.initscr (иначе бары рендерятся как «?»).
-    Пытаемся получить UTF-8; если не вышло — переходим на ASCII-графику."""
+    """Set the locale BEFORE curses.initscr (or bars render as "?").
+    Try to get UTF-8; if that fails, switch to ASCII glyphs."""
     utf8 = False
     for loc in ("", "en_US.UTF-8", "C.UTF-8", "en_US.utf8", "C.utf8", "UTF-8"):
         try:
@@ -3081,8 +3083,8 @@ def setup_output():
             utf8 = True
             break
     if os.environ.get("CCOST_UTF8"):
-        utf8 = True           # ручной override: на Windows Terminal юникод ок
-    try:                      # текстовый режим: не падать на не-UTF8 stdout
+        utf8 = True           # manual override: Windows Terminal handles unicode
+    try:                      # text mode: do not crash on non-UTF8 stdout
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     except Exception:
         pass
@@ -3091,10 +3093,10 @@ def setup_output():
 
 
 def _dodge_broken_rep():
-    """ncurses < 6.1 (macOS застрял на 6.0) с багом REP-оптимизации: повторяя
-    многобайтовый символ, шлёт только его последний байт (█ → \\x88 + CSI n b),
-    и терминал рисует кашу из битого UTF-8. Срабатывает только там, где
-    terminfo заявляет rep (kitty) — уходим на xterm-256color без rep."""
+    """ncurses < 6.1 (macOS ships 6.0) has a REP optimization bug: repeating a
+    multibyte character it emits only its final byte, and the terminal renders
+    broken UTF-8. Triggers only where terminfo declares rep (kitty) — switch
+    to xterm-256color, which has no rep."""
     if getattr(curses, "ncurses_version", (99,)) >= (6, 1):
         return
     try:
@@ -3107,7 +3109,7 @@ def _dodge_broken_rep():
 
 def main():
     arg = sys.argv[1] if len(sys.argv) > 1 else ""
-    if arg == "--probe":                # CI: проверить, что webview упакован
+    if arg == "--probe":                # CI: verify webview is bundled
         try:
             import webview              # noqa: F401
             msg = "ok"
@@ -3118,21 +3120,21 @@ def main():
         return
     setup_output()
     co = Collector()
-    if arg in ("gui", "web", "-g"):     # скан пойдёт в фоне — окно сразу
+    if arg in ("gui", "web", "-g"):     # scan runs in the background — window opens now
         rest = sys.argv[2:]
         port = next((int(a) for a in rest if a.isdigit()), 0)
         serve_gui(co, port, open_browser="--no-open" not in rest)
         return
-    # окно-приложение; на Windows-бинарнике это же — режим по умолчанию
+    # app window; on the Windows binary this is also the default mode
     if arg == "app" or (arg == "" and os.name == "nt"
                         and getattr(sys, "frozen", False)):
         rest = sys.argv[2:]
         port = next((int(a) for a in rest if a.isdigit()), 0)
-        if native_window(co, port):     # pywebview: своя рамка
+        if native_window(co, port):     # pywebview: custom chrome
             return
         b = find_app_browser()          # fallback: chromium --app
         if not b:
-            print("не нашёл Chrome/Chromium/Edge — открываю вкладку браузера",
+            print("Chrome/Chromium/Edge not found — opening a browser tab",
                   flush=True)
         serve_gui(co, port, open_browser=b is None, app_browser=b)
         return
@@ -3145,19 +3147,19 @@ def main():
         print_text(co)
         return
     if curses is None:
-        sys.stderr.write("для TUI нужен модуль curses "
-                         "(Windows: pip install windows-curses); текстовый отчёт:\n")
+        sys.stderr.write("the TUI needs the curses module "
+                         "(Windows: pip install windows-curses); text report:\n")
         print_text(co)
         return
     _dodge_broken_rep()
     try:
         curses.wrapper(App(co).run)
-    except Exception as e:  # фолбэк на текст при любой проблеме с curses
-        sys.stderr.write(f"TUI недоступен ({e}); текстовый отчёт:\n")
+    except Exception as e:  # fall back to text on any curses problem
+        sys.stderr.write(f"TUI unavailable ({e}); text report:\n")
         print_text(co)
 
 
 if __name__ == "__main__":
     import multiprocessing
-    multiprocessing.freeze_support()   # параллельный парс во frozen-бинарях
+    multiprocessing.freeze_support()   # parallel parse inside frozen binaries
     main()

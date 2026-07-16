@@ -10,67 +10,67 @@
 <body>
 <header>
   <div class="brand">ccost <span id="livedot"></span><span id="livelbl">live</span></div>
-  <span id="conn" hidden>нет связи</span>
+  <span id="conn" hidden>offline</span>
   <a id="upd" hidden target="_blank" rel="noopener"></a>
   <div class="hright">
-    <nav id="periods" aria-label="период"></nav>
-    <button id="gear" aria-label="настройки" title="настройки"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.09a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.09a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.09a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg></button>
+    <nav id="periods" aria-label="period"></nav>
+    <button id="gear" aria-label="settings" title="settings"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.09a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.09a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.09a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg></button>
   </div>
 </header>
 <main>
   <section class="hero" id="hero">
     <div id="bigcost"><span id="bignum">$0.00</span><span id="cursor"></span></div>
-    <div class="hero-sub" id="herosub">загрузка…</div>
+    <div class="hero-sub" id="herosub">loading…</div>
     <div id="loadbar" hidden><i></i></div>
   </section>
   <section id="emptybox" hidden></section>
   <div class="warn" id="warn" hidden></div>
   <section class="cards" id="cards"></section>
   <section class="panel">
-    <h2>стоимость по дням<span id="daysel" hidden></span></h2>
+    <h2>cost by day<span id="daysel" hidden></span></h2>
     <div class="chart" id="daychart"></div>
     <div class="axis" id="dayaxis"></div>
   </section>
   <div class="cols">
     <section class="panel">
-      <h2>неделя × часы</h2>
+      <h2>week × hours</h2>
       <div class="heatwrap">
-        <div class="heatdays">пн вт ср чт пт сб вс</div>
+        <div class="heatdays">mo tu we th fr sa su</div>
         <div>
           <div class="heatgrid" id="heat"></div>
           <div class="heathours"><span>00</span><span>06</span><span>12</span><span>18</span><span>23</span></div>
         </div>
       </div>
     </section>
-    <section class="panel"><h2>модели</h2><div class="rows" id="models"></div></section>
+    <section class="panel"><h2>models</h2><div class="rows" id="models"></div></section>
   </div>
   <div class="cols">
-    <section class="panel"><h2>топ-чаты</h2><div class="rows" id="chats"></div></section>
-    <section class="panel"><h2>инструменты</h2><div class="rows" id="tools"></div></section>
+    <section class="panel"><h2>top chats</h2><div class="rows" id="chats"></div></section>
+    <section class="panel"><h2>tools</h2><div class="rows" id="tools"></div></section>
   </div>
   <section class="panel">
-    <h2>часы суток</h2>
+    <h2>hours of day</h2>
     <div class="chart" id="hourchart" style="height:120px"></div>
     <div class="axis axis24"><span>00</span><span>06</span><span>12</span><span>18</span><span>23</span></div>
   </section>
   <section class="panel">
-    <h2>год</h2>
+    <h2>year</h2>
     <div id="yearwrap">
       <div id="yearmonths"></div>
       <div id="year"></div>
     </div>
   </section>
   <section class="panel">
-    <h2>рекорды</h2>
+    <h2>records</h2>
     <div id="recs"></div>
   </section>
-  <footer>ccost · live-дашборд · периоды: ←/→ или свайп · клик по бару дня — детали дня (Esc — сброс)</footer>
+  <footer>ccost · live dashboard · periods: ←/→ or swipe · click a day bar for details (Esc to reset)</footer>
 </main>
 <div id="tip"></div>
 <div id="shade" hidden></div>
-<aside id="drawer" aria-label="настройки">
-  <h3>настройки</h3>
-  <div id="cfgbody">загрузка…</div>
+<aside id="drawer" aria-label="settings">
+  <h3>settings</h3>
+  <div id="cfgbody">loading…</div>
 </aside>
 <script src="app.js"></script>
 </body>

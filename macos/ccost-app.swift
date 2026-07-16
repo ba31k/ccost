@@ -1,7 +1,7 @@
-// ccost.app — нативная macOS-обёртка дашборда: запускает встроенный движок
-// «ccost gui --no-open» (бинарь в Resources бандла), ловит URL из stdout
-// и показывает дашборд в WKWebView на всю высоту окна (шапка = тайтлбар).
-// Сборка: sh build.sh (движок задаётся через CCOST_ENGINE)
+// ccost.app — native macOS shell for the dashboard: launches the bundled
+// engine ("ccost gui --no-open" binary in Resources), reads the URL from its
+// stdout and shows the dashboard in a full-height WKWebView (header acts as
+// the titlebar). Build: sh build.sh (engine path via CCOST_ENGINE)
 import Cocoa
 import WebKit
 
@@ -18,8 +18,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
 
     func applicationDidFinishLaunching(_ note: Notification) {
         let rect = NSRect(x: 0, y: 0, width: 1240, height: 860)
-        // контент на всю высоту: шапка дашборда и есть тайтлбар (монолит),
-        // светофоры ложатся поверх, перетаскивание — через JS-мост «drag»
+        // full-height content: the dashboard header is the titlebar; traffic
+        // lights overlay it, dragging goes through the JS "drag" bridge
         window = NSWindow(contentRect: rect,
                           styleMask: [.titled, .closable, .miniaturizable,
                                       .resizable, .fullSizeContentView],
@@ -27,8 +27,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
         window.title = "ccost"
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
-        // пустой unified-тулбар делает тайтлбар выше — светофоры опускаются
-        // на линию шапки дашборда
+        // an empty unified toolbar makes the titlebar taller — traffic lights
+        // drop onto the dashboard header line
         window.toolbarStyle = .unified
         let tb = NSToolbar(identifier: "ccost-tb")
         tb.showsBaselineSeparator = false
@@ -73,7 +73,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
         i{width:9px;height:9px;border-radius:50%;background:#7ee787;margin-right:10px;
           box-shadow:0 0 10px rgba(126,231,135,.7);animation:p 1.2s infinite}
         @keyframes p{50%{opacity:.25}}
-        </style><body><i></i> ccost · читаю сессии…</body>
+        </style><body><i></i> ccost · reading sessions…</body>
         """, baseURL: nil)
     }
 
@@ -88,10 +88,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
 
     func launchServer() {
         guard let script = Bundle.main.path(forResource: "ccost", ofType: nil) else {
-            showError("в бандле нет ccost"); return
+            showError("ccost engine missing from the bundle"); return
         }
-        // Resources/ccost — полноценный бинарь (PyInstaller); в dev-сборке
-        // может лежать скрипт — shebang подхватит python3 сам
+        // Resources/ccost is a standalone binary (PyInstaller); a dev build
+        // may contain the script instead — the shebang picks up python3
         let p = Process()
         p.executableURL = URL(fileURLWithPath: script)
         p.arguments = ["gui", "--no-open"]
@@ -115,11 +115,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
         }
         p.terminationHandler = { [weak self] _ in
             DispatchQueue.main.async {
-                self?.showError("встроенный сервер ccost завершился — нужен python3 в PATH")
+                self?.showError("the embedded ccost server exited — python3 required in PATH")
             }
         }
         do { try p.run() } catch {
-            showError("не запустился python3: \(error.localizedDescription)")
+            showError("failed to launch: \(error.localizedDescription)")
         }
         proc = p
     }
@@ -127,8 +127,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
     @objc func reload(_ sender: Any?) { webView.reload() }
 
     // ---------------------------------------------------------- menu bar
-    // Живой «$сегодня» в статус-баре; включается тумблером в настройках
-    // дашборда (config.menubar), опрашивается вместе со стоимостью.
+    // Live "$ today" in the status bar; toggled from the dashboard settings
+    // (config.menubar), polled together with the cost.
     func startStatusUpdates() {
         refreshStatus()
         statusTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) {
@@ -178,12 +178,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
         item.button?.font = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .semibold)
         item.button?.title = "…"
         let menu = NSMenu()
-        let open = NSMenuItem(title: "Открыть ccost",
+        let open = NSMenuItem(title: "Open ccost",
                               action: #selector(openWindow(_:)), keyEquivalent: "")
         open.target = self
         menu.addItem(open)
         menu.addItem(NSMenuItem.separator())
-        menu.addItem(NSMenuItem(title: "Выйти",
+        menu.addItem(NSMenuItem(title: "Quit",
                                 action: #selector(NSApplication.terminate(_:)),
                                 keyEquivalent: "q"))
         item.menu = menu
@@ -201,8 +201,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
         return true
     }
 
-    // при включённом menu bar закрытие окна не убивает приложение —
-    // счётчик продолжает жить в статус-баре
+    // with the menu bar counter on, closing the window keeps the app alive
     func applicationShouldTerminateAfterLastWindowClosed(_ app: NSApplication) -> Bool {
         return statusItem == nil
     }
@@ -213,7 +212,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
     }
 }
 
-// минимальное меню: Cmd+Q, Cmd+W, Cmd+R и Edit для копирования из дашборда
+// minimal menu: Cmd+Q, Cmd+W, Cmd+R plus Edit for copying from the dashboard
 func buildMenu(_ d: AppDelegate) -> NSMenu {
     let main = NSMenu()
     let appItem = NSMenuItem(); main.addItem(appItem)

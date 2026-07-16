@@ -1,10 +1,10 @@
 "use strict";
 const $ = id => document.getElementById(id);
-const PERIODS = [["всё",0],["месяц",4],["30 дней",3],["7 дней",2],["сегодня",1]];
-let pi = 0;                                   // индекс в PERIODS (визуальный порядок)
+const PERIODS = [["all",0],["month",4],["30 days",3],["7 days",2],["today",1]];
+let pi = 0;                                   // index into PERIODS (visual order)
 let period = PERIODS[0][1];
-let selDay = null;                            // выбранный день (детализация)
-let LD = [];                                  // последний ряд дней (для листания)
+let selDay = null;                            // selected day (drill-down)
+let LD = [];                                  // last day series (for paging)
 const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
 const mainEl = document.querySelector("main");
 
@@ -16,7 +16,7 @@ function htok(n){
   return String(n);
 }
 
-/* плавный перекат числа */
+/* smooth number roll */
 function lerpMoney(el, to, instant){
   const from = +el.dataset.v || 0;
   el.dataset.v = to;
@@ -29,7 +29,7 @@ function lerpMoney(el, to, instant){
   })(t0);
 }
 
-/* тултипы: контент живёт на элементе (переживает live-обновления) */
+/* tooltips: content lives on the element (survives live updates) */
 const tip = $("tip");
 function bindTip(el){
   el.addEventListener("mousemove", e => {
@@ -43,7 +43,7 @@ function bindTip(el){
 }
 function esc(s){ const d = document.createElement("i"); d.textContent = s; return d.innerHTML; }
 
-/* ------------------------------------------------ период: бегунок и листание */
+/* ------------------------------------------------ period: slider and paging */
 const nav = $("periods");
 const thumb = document.createElement("div");
 thumb.id = "thumb";
@@ -76,7 +76,7 @@ function setDaySel(day, refetch = true){
   document.body.classList.toggle("day-mode", !!day);
   const chip = $("daysel");
   chip.hidden = !day;
-  if (day) chip.textContent = "· " + day + " · Esc — сброс";
+  if (day) chip.textContent = "· " + day + " · Esc to reset";
   if (refetch){ mainEl.classList.add("dim"); tick(true); }
 }
 addEventListener("resize", moveThumb);
@@ -85,7 +85,7 @@ addEventListener("keydown", e => {
     closeDrawer(); return;
   }
   if (e.key === "Escape" && selDay){ setDaySel(null); return; }
-  if (selDay){                                // в режиме дня ←/→ листают дни
+  if (selDay){                                // in day mode ←/→ page through days
     const i = LD.findIndex(x => x.d === selDay);
     if (e.key === "ArrowRight" && i >= 0 && i < LD.length - 1) setDaySel(LD[i+1].d);
     if (e.key === "ArrowLeft" && i > 0) setDaySel(LD[i-1].d);
@@ -94,7 +94,7 @@ addEventListener("keydown", e => {
   if (e.key === "ArrowRight") setPeriod(pi + 1);
   if (e.key === "ArrowLeft") setPeriod(pi - 1);
 });
-/* горизонтальный свайп трекпадом по герою — листает периоды */
+/* horizontal trackpad swipe over the hero pages periods */
 let wacc = 0, wlock = 0;
 $("hero").addEventListener("wheel", e => {
   if (Math.abs(e.deltaX) <= Math.abs(e.deltaY)) return;
@@ -106,10 +106,10 @@ $("hero").addEventListener("wheel", e => {
   else if (wacc < -60){ setPeriod(pi - 1); wlock = now + 450; wacc = 0; }
 }, {passive: false});
 
-/* ------------------------------------------------ статичные карточки */
+/* ------------------------------------------------ static cards */
 const CARD_DEFS = [
-  ["сегодня", "cToday"], ["прогноз на месяц", "cFc"],
-  ["кэш сэкономил", "cSaved"], ["в среднем за день", "cAvg"],
+  ["today", "cToday"], ["month forecast", "cFc"],
+  ["cache saved", "cSaved"], ["average day", "cAvg"],
 ];
 const cardRef = {};
 for (const [lbl, key] of CARD_DEFS){
@@ -121,8 +121,8 @@ for (const [lbl, key] of CARD_DEFS){
   $("cards").appendChild(d);
 }
 
-/* ------------------------------------------------ рендер */
-const WD = ["пн","вт","ср","чт","пт","сб","вс"];
+/* ------------------------------------------------ render */
+const WD = ["mo","tu","we","th","fr","sa","su"];
 let lastSig = null;
 const R = {days: [], grid: [], heat: [], models: [], chats: [], tools: [], hours: [], year: []};
 
@@ -144,7 +144,7 @@ function floater(delta){
   setTimeout(() => bc.classList.remove("burn"), 900);
 }
 
-function stag(el, i, ms){                     // каскадное появление строк
+function stag(el, i, ms){                     // staggered row entrance
   if (reduced) return;
   el.style.animation = "rowin .38s both " + Math.min(i * ms, 500) + "ms";
 }
@@ -153,7 +153,7 @@ function render(d, fresh){
   const t = d.total;
   if (!t){
     document.body.classList.add("nodata");
-    $("herosub").textContent = "нет данных за период";
+    $("herosub").textContent = "no data for this period";
     $("bignum").textContent = "$0.00"; $("bignum").dataset.v = 0;
     const eb = $("emptybox");
     eb.hidden = false;
@@ -164,14 +164,14 @@ function render(d, fresh){
       eb.appendChild(el);
     };
     if (d.have_any){
-      line("e1", "за этот период активности не было");
-      line("e2", "переключи период: ← → или свайп по счётчику");
+      line("e1", "no activity in this period");
+      line("e2", "switch periods: ← → or swipe over the counter");
     } else {
-      line("e1", "данные Claude Code не найдены");
-      line("e2", "смотрел в: " + (d.root || "~/.claude/projects"));
-      line("e2", "если Claude Code живёт в WSL — запусти с переменной " +
+      line("e1", "no Claude Code data found");
+      line("e2", "looked in: " + (d.root || "~/.claude/projects"));
+      line("e2", "if Claude Code lives in WSL, set " +
                  "CCOST_ROOT=\\wsl.localhost\Ubuntu\home\<user>\.claude\projects " +
-                 "или используй ccost-linux внутри WSL");
+                 "or run ccost-linux inside WSL");
     }
     for (const id of ["daychart","heat","models","chats","tools","hourchart"])
       $(id).replaceChildren();
@@ -180,7 +180,7 @@ function render(d, fresh){
   }
   document.body.classList.remove("nodata");
   $("emptybox").hidden = true;
-  /* герой + живые «+$» тики */
+  /* hero + live "+$" ticks */
   const prev = +$("bignum").dataset.v || 0;
   if (!fresh && prev > 0 && t.cost > prev + 0.004 && !reduced)
     floater(t.cost - prev);
@@ -193,31 +193,31 @@ function render(d, fresh){
     const b = document.createElement(strong ? "b" : "span");
     b.textContent = txt; hs.appendChild(b);
   };
-  seg(htok(t.tok)); seg(" токенов · "); seg(t.msgs.toLocaleString("ru-RU"));
-  seg(" сообщений · "); seg(String(t.sessions)); seg(" чатов · ");
-  if (d.day){ seg("день "); seg(d.day, true); }
-  else { seg(t.first + " … " + t.last); seg(" · стрик "); seg(t.streak + " дн.", true); }
+  seg(htok(t.tok)); seg(" tokens · "); seg(t.msgs.toLocaleString("en-US"));
+  seg(" messages · "); seg(String(t.sessions)); seg(" chats · ");
+  if (d.day){ seg("day "); seg(d.day, true); }
+  else { seg(t.first + " … " + t.last); seg(" · streak "); seg(t.streak + " days", true); }
 
   const w = $("warn");
   if (d.unknown.length){
     w.hidden = false;
-    w.textContent = "нет прайса (стоимость = $0): " + d.unknown.join(", ");
+    w.textContent = "no price (counted as $0): " + d.unknown.join(", ");
   } else w.hidden = true;
 
-  /* карточки */
+  /* cards */
   lerpMoney(cardRef.cToday.val, t.today, fresh);
-  cardRef.cToday.sub.textContent = "за последний час " + money(t.hour_cost);
+  cardRef.cToday.sub.textContent = "last hour " + money(t.hour_cost);
   lerpMoney(cardRef.cFc.val, t.forecast, fresh);
-  cardRef.cFc.sub.textContent = "факт " + money(t.mtd);
+  cardRef.cFc.sub.textContent = "so far " + money(t.mtd);
   lerpMoney(cardRef.cSaved.val, t.saved, fresh);
-  cardRef.cSaved.sub.textContent = "без кэша ≈ " + money(t.cost + t.saved);
+  cardRef.cSaved.sub.textContent = "without cache ≈ " + money(t.cost + t.saved);
   lerpMoney(cardRef.cAvg.val, t.avg_day, fresh);
-  cardRef.cAvg.sub.textContent = "пик " + t.busiest_day + " · " + money(t.busiest_cost);
+  cardRef.cAvg.sub.textContent = "peak " + t.busiest_day + " · " + money(t.busiest_cost);
 
   const up = $("upd");
   if (d.update){
     up.hidden = false;
-    up.textContent = "вышла " + d.update.tag;
+    up.textContent = d.update.tag + " is out";
     up.href = d.update.url;
   } else up.hidden = true;
 
@@ -231,7 +231,7 @@ function render(d, fresh){
   renderRecs(d, fresh);
 }
 
-const MONTHS = ["янв","фев","мар","апр","май","июн","июл","авг","сен","окт","ноя","дек"];
+const MONTHS = ["jan","feb","mar","apr","may","jun","jul","aug","sep","oct","nov","dec"];
 function gotoDay(day){
   if (period !== 0){
     pi = 0; period = 0;
@@ -245,7 +245,7 @@ function renderYear(d, fresh){
   if (!y.length) return;
   const mx = Math.max(...y.map(x => x.c), 0.01);
   const first = new Date(y[0].d + "T00:00:00");
-  const pad = (first.getDay() + 6) % 7;         // пн = 0
+  const pad = (first.getDay() + 6) % 7;         // monday = 0
   if (fresh || R.year.length !== y.length){
     const box = $("year");
     box.replaceChildren();
@@ -348,7 +348,7 @@ function setDayBar(b, x, mx, today){
   b.classList.toggle("sel", x.d === selDay);
   b._day = x.d;
   b._tip = esc(x.d) + " · <b>" + money(x.c) + "</b>" +
-           (x.d === selDay ? "" : " · клик — детали дня");
+           (x.d === selDay ? "" : " · click for day details");
 }
 
 function renderHeat(d, fresh){
@@ -363,7 +363,7 @@ function renderHeat(d, fresh){
     R.heat = [];
     d.heat.forEach((row,i) => row.forEach((v,j) => {
       const c = document.createElement("i");
-      if (!reduced){                          // скан-развёртка слева направо
+      if (!reduced){                          // left-to-right scan sweep
         c.style.opacity = "0";
         c.style.transitionDelay = (j*14 + i*6) + "ms";
       }
@@ -432,7 +432,7 @@ function renderChats(d, fresh){
     lerpMoney(r.children[1], c.cost, fresh);
     const meta = r.children[2];
     meta.replaceChildren();
-    for (const chip of [c.project, c.model, c.msgs.toLocaleString("ru-RU")+" сообщ."]){
+    for (const chip of [c.project, c.model, c.msgs.toLocaleString("en-US")+" msgs"]){
       const s = document.createElement("span");
       s.className = "chip"; s.textContent = chip;
       meta.appendChild(s);
@@ -492,12 +492,12 @@ function renderHours(d, fresh){
 }
 function setHourBar(b, x, i, mx){
   b.style.height = Math.max(x.c/mx*100, x.c > 0 ? 2 : 0.6) + "%";
-  b._tip = String(i).padStart(2,"0") + ":00 · <b>" + money(x.c) + "</b> · " + x.m + " сообщ.";
+  b._tip = String(i).padStart(2,"0") + ":00 · <b>" + money(x.c) + "</b> · " + x.m + " msgs";
 }
 
-/* ------------------------------------------------ live-цикл */
+/* ------------------------------------------------ live loop */
 function renderLoading(l){
-  $("herosub").textContent = "читаю сессии… " + l.done + " / " + l.total + " файлов";
+  $("herosub").textContent = "reading sessions… " + l.done + " / " + l.total + " files";
   const lb = $("loadbar");
   lb.hidden = false;
   lb.firstElementChild.style.width = (l.total ? l.done / l.total * 100 : 0) + "%";
@@ -509,7 +509,7 @@ async function tick(force){
     if (d.loading){
       renderLoading(d.loading);
       $("livedot").classList.remove("off");
-      $("livelbl").textContent = "загрузка";
+      $("livelbl").textContent = "loading";
       mainEl.classList.remove("dim");
       setTimeout(() => tick(true), 400);
       return;
@@ -524,18 +524,18 @@ async function tick(force){
     document.body.classList.remove("offline");
   }catch(e){
     $("livedot").classList.add("off");
-    $("livelbl").textContent = "нет связи";
+    $("livelbl").textContent = "offline";
     $("conn").hidden = false;
     document.body.classList.add("offline");
   }
   mainEl.classList.remove("dim");
 }
-/* --------------------------------------- своя рамка окна (mac / windows) */
+/* --------------------------------------- custom window chrome (mac / windows) */
 (function chrome(){
   const header = document.querySelector("header");
   const wk = window.webkit && window.webkit.messageHandlers
           && window.webkit.messageHandlers.ccost;
-  if (wk){                                    // ccost.app: drag через performDrag
+  if (wk){                                    // ccost.app: drag via performDrag
     document.body.classList.add("chrome-mac");
     header.addEventListener("mousedown", e => {
       if (e.target.closest("button, nav, a")) return;
@@ -546,7 +546,7 @@ async function tick(force){
       wk.postMessage("zoom");
     });
   }
-  addEventListener("pywebviewready", () => {  // Windows: frameless + свои кнопки
+  addEventListener("pywebviewready", () => {  // Windows: frameless + custom buttons
     document.body.classList.add("chrome-win");
     const strip = document.createElement("div");
     strip.className = "pywebview-drag-region";
@@ -566,7 +566,7 @@ async function tick(force){
     moveThumb();
   });
 })();
-/* --------------------------------------------- настройки (конфиг-панель) */
+/* --------------------------------------------- settings drawer */
 let cfgCache = null;
 let timer = null;
 function setRefresh(ms){
@@ -598,7 +598,7 @@ function renderCfg(){
     e.className = "cfg-h"; e.textContent = t;
     body.appendChild(e);
   };
-  head("источники");
+  head("sources");
   for (const [key, name] of [["claude","Claude Code"],["codex","Codex · OpenAI"]]){
     const m = meta[key];
     const row = document.createElement("label");
@@ -616,8 +616,8 @@ function renderCfg(){
     const n2 = document.createElement("div");
     n2.className = "dim2";
     n2.textContent = m.files
-      ? m.files + " файлов · " + m.records.toLocaleString("ru-RU") + " записей"
-      : "не найдено";
+      ? m.files + " files · " + m.records.toLocaleString("en-US") + " records"
+      : "not found";
     const n3 = document.createElement("div");
     n3.className = "dim2";
     n3.textContent = m.root;
@@ -625,15 +625,15 @@ function renderCfg(){
     row.append(cb, tgl, info);
     body.appendChild(row);
   }
-  head("обновление");
-  body.appendChild(chipRow([["2 с",2000],["5 с",5000],["10 с",10000]],
+  head("refresh");
+  body.appendChild(chipRow([["2 s",2000],["5 s",5000],["10 s",10000]],
                            c.refresh_ms, v => postCfg({refresh_ms: v})));
-  head("период при старте");
+  head("default period");
   body.appendChild(chipRow(PERIODS.map(p => [p[0], p[1]]),
                            c.default_period, v => postCfg({default_period: v})));
-  head("приложение");
-  for (const [key, label] of [["menubar","счётчик в menu bar (мак)"],
-                              ["check_updates","проверять обновления"]]){
+  head("app");
+  for (const [key, label] of [["menubar","menu bar counter (mac)"],
+                              ["check_updates","check for updates"]]){
     const row = document.createElement("label");
     row.className = "srcrow";
     const cb = document.createElement("input");
@@ -650,7 +650,7 @@ function renderCfg(){
     row.append(cb, tgl, info);
     body.appendChild(row);
   }
-  head("прайс · $ за 1M токенов");
+  head("prices · $ per 1M tokens");
   const defaults = {};
   for (const [n, p] of Object.entries(cfgCache.prices.anthropic))
     defaults[n] = [p[0], p[1]];
@@ -660,7 +660,7 @@ function renderCfg(){
   const inputs = {};
   const tbl = document.createElement("div");
   tbl.className = "pricetbl";
-  for (const t of ["модель", "in", "out"]){
+  for (const t of ["model", "in", "out"]){
     const e = document.createElement("div");
     e.className = "ph"; e.textContent = t;
     tbl.appendChild(e);
@@ -694,14 +694,14 @@ function renderCfg(){
   body.appendChild(tbl);
   const note = document.createElement("div");
   note.className = "cfg-note";
-  note.textContent = "правь цифры — пересчёт всей истории мгновенный; " +
-                     "бирюзовая модель = своя цена";
+  note.textContent = "edit a number to reprice the whole history instantly; " +
+                     "teal model = custom price";
   body.appendChild(note);
   if (Object.keys(ov).length){
     const rb = document.createElement("button");
     rb.className = "chipbtn";
     rb.style.marginTop = "10px";
-    rb.textContent = "сбросить цены к прайсу";
+    rb.textContent = "reset to list prices";
     rb.onclick = () => postCfg({prices: {}});
     body.appendChild(rb);
   }
@@ -722,7 +722,7 @@ $("gear").onclick = () => {
   $("shade").hidden = false;
   document.body.classList.add("cfgopen");
   fetchCfg().then(renderCfg)
-    .catch(() => { $("cfgbody").textContent = "не удалось получить конфиг"; });
+    .catch(() => { $("cfgbody").textContent = "failed to load config"; });
 };
 $("shade").onclick = closeDrawer;
 
