@@ -193,10 +193,13 @@ function render(d, fresh){
     const b = document.createElement(strong ? "b" : "span");
     b.textContent = txt; hs.appendChild(b);
   };
+  if (d.day){ seg(d.day, true); seg(" · "); }
   seg(htok(t.tok)); seg(" tokens · "); seg(t.msgs.toLocaleString("en-US"));
-  seg(" messages · "); seg(String(t.sessions)); seg(" chats · ");
-  if (d.day){ seg("day "); seg(d.day, true); }
-  else { seg(t.first + " … " + t.last); seg(" · streak "); seg(t.streak + " days", true); }
+  seg(" messages · "); seg(String(t.sessions)); seg(" chats");
+  if (!d.day){
+    seg(" · "); seg(t.first + " … " + t.last);
+    seg(" · streak "); seg(t.streak + " days", true);
+  }
 
   const w = $("warn");
   if (d.unknown.length){
@@ -387,16 +390,36 @@ function setHeatCell(c, v, i, j, hmax, peak){
   c._tip = WD[i] + " " + String(j).padStart(2,"0") + ":00 · <b>" + money(v) + "</b>";
 }
 
-let modelsOpen = false;
+const tailOpen = {models: false, chats: false, tools: false};
+function tailFinish(box, more, total, visible, key, noun){
+  if (total <= visible) return;
+  box.appendChild(more);
+  const btn = document.createElement("button");
+  btn.className = "morebtn";
+  const label = () => tailOpen[key]
+    ? "− collapse"
+    : "+ " + (total - visible) + " more " + noun;
+  btn.textContent = label();
+  btn.onclick = () => {
+    tailOpen[key] = !tailOpen[key];
+    more.classList.toggle("open", tailOpen[key]);
+    btn.textContent = label();
+  };
+  box.appendChild(btn);
+}
+function tailBox(key){
+  const more = document.createElement("div");
+  more.className = "moretail";
+  more.classList.toggle("open", tailOpen[key]);
+  return more;
+}
 function renderModels(d, fresh){
   const mmax = Math.max(...d.models.map(m => m.cost), 0.01);
   if (fresh){
     const box = $("models");
     box.replaceChildren();
     R.models = [];
-    const more = document.createElement("div");
-    more.id = "mmore";
-    more.classList.toggle("open", modelsOpen);
+    const more = tailBox("models");
     d.models.forEach((m, i) => {
       const r = document.createElement("div");
       r.className = "mrow";
@@ -407,21 +430,7 @@ function renderModels(d, fresh){
       (i < 3 ? box : more).appendChild(r);   // top 3 visible, rest collapsible
       R.models.push(r);
     });
-    if (d.models.length > 3){
-      box.appendChild(more);
-      const btn = document.createElement("button");
-      btn.className = "morebtn";
-      const label = () => modelsOpen
-        ? "− collapse"
-        : "+ " + (d.models.length - 3) + " more models";
-      btn.textContent = label();
-      btn.onclick = () => {
-        modelsOpen = !modelsOpen;
-        more.classList.toggle("open", modelsOpen);
-        btn.textContent = label();
-      };
-      box.appendChild(btn);
-    }
+    tailFinish(box, more, d.models.length, 3, "models", "models");
   }
   d.models.forEach((m, i) => {
     const r = R.models[i]; if (!r) return;
@@ -436,15 +445,17 @@ function renderChats(d, fresh){
     const box = $("chats");
     box.replaceChildren();
     R.chats = [];
+    const more = tailBox("chats");
     d.chats.forEach((c, i) => {
       const r = document.createElement("div");
       r.className = "row";
       r.innerHTML = '<div class="name"></div><div class="cost"></div><div class="meta"></div>';
       r.children[0].textContent = c.title;
       stag(r, i, 26);
-      box.appendChild(r);
+      (i < 5 ? box : more).appendChild(r);
       R.chats.push(r);
     });
+    tailFinish(box, more, d.chats.length, 5, "chats", "chats");
   }
   d.chats.forEach((c, i) => {
     const r = R.chats[i]; if (!r) return;
@@ -465,15 +476,17 @@ function renderTools(d, fresh){
     const box = $("tools");
     box.replaceChildren();
     R.tools = [];
+    const more = tailBox("tools");
     d.tools.forEach((x, i) => {
       const r = document.createElement("div");
       r.className = "row";
       r.innerHTML = '<div class="name"></div><div class="cost"></div>' +
                     '<div class="hbar" style="grid-column:1"><i></i></div>';
       stag(r, i, 26);
-      box.appendChild(r);
+      (i < 5 ? box : more).appendChild(r);
       R.tools.push(r);
     });
+    tailFinish(box, more, d.tools.length, 5, "tools", "tools");
   }
   d.tools.forEach((x, i) => {
     const r = R.tools[i]; if (!r) return;
