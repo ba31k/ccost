@@ -25,6 +25,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
                                       .resizable, .fullSizeContentView],
                           backing: .buffered, defer: false)
         window.title = "ccost"
+        // programmatic NSWindows release themselves on close; the menu bar
+        // counter reopens this window later, so keep it alive
+        window.isReleasedWhenClosed = false
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
         // an empty unified toolbar makes the titlebar taller — traffic lights
