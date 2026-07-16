@@ -1250,7 +1250,7 @@ main.dim{opacity:.45}
   15%{opacity:1}
   100%{opacity:0; transform:translateY(-40px)}
 }
-.hero-sub{color:var(--dim); margin-top:12px; font-family:var(--mono); font-size:13px}
+.hero-sub{color:var(--dim); margin-top:18px; font-family:var(--mono); font-size:13px}
 #loadbar{height:3px; background:var(--panel2); border-radius:2px; margin-top:14px;
   max-width:420px; overflow:hidden}
 #loadbar i{display:block; height:100%; width:0; background:var(--teal);
@@ -1462,6 +1462,9 @@ body.chrome-win #drawer{top:30px}
   font:11.5px var(--mono); cursor:pointer; padding:9px 6px 2px; text-align:left;
   transition:color .15s}
 .morebtn:hover{color:var(--teal)}
+
+/* tools rows match chat-row height (chats have a chips line) */
+#tools .row{padding:13px 8px}
 </style>
 </head>
 <body>
