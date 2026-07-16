@@ -387,12 +387,16 @@ function setHeatCell(c, v, i, j, hmax, peak){
   c._tip = WD[i] + " " + String(j).padStart(2,"0") + ":00 · <b>" + money(v) + "</b>";
 }
 
+let modelsOpen = false;
 function renderModels(d, fresh){
   const mmax = Math.max(...d.models.map(m => m.cost), 0.01);
   if (fresh){
     const box = $("models");
     box.replaceChildren();
     R.models = [];
+    const more = document.createElement("div");
+    more.id = "mmore";
+    more.classList.toggle("open", modelsOpen);
     d.models.forEach((m, i) => {
       const r = document.createElement("div");
       r.className = "mrow";
@@ -400,9 +404,24 @@ function renderModels(d, fresh){
                     '<div class="tok"></div><div class="cost"></div>';
       r.children[0].textContent = m.name;
       stag(r, i, 40);
-      box.appendChild(r);
+      (i < 5 ? box : more).appendChild(r);   // top 5 visible, rest collapsible
       R.models.push(r);
     });
+    if (d.models.length > 5){
+      box.appendChild(more);
+      const btn = document.createElement("button");
+      btn.className = "morebtn";
+      const label = () => modelsOpen
+        ? "− collapse"
+        : "+ " + (d.models.length - 5) + " more models";
+      btn.textContent = label();
+      btn.onclick = () => {
+        modelsOpen = !modelsOpen;
+        more.classList.toggle("open", modelsOpen);
+        btn.textContent = label();
+      };
+      box.appendChild(btn);
+    }
   }
   d.models.forEach((m, i) => {
     const r = R.models[i]; if (!r) return;

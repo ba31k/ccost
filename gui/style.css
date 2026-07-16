@@ -270,3 +270,12 @@ body.chrome-win #drawer{top:30px}
 .pricetbl .pn{align-self:center}
 .pricetbl .pn.ovr{color:var(--teal)}
 .cfg-note{color:var(--dim); font:11px var(--mono); margin-top:8px}
+
+/* collapsible tail of the models list */
+#mmore{overflow:hidden; max-height:0; transition:max-height .35s ease}
+#mmore.open{max-height:640px}
+#mmore .mrow{border-top:1px solid var(--line)}
+.morebtn{appearance:none; border:0; background:transparent; color:var(--dim);
+  font:11.5px var(--mono); cursor:pointer; padding:9px 6px 2px; text-align:left;
+  transition:color .15s}
+.morebtn:hover{color:var(--teal)}

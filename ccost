@@ -1453,6 +1453,15 @@ body.chrome-win #drawer{top:30px}
 .pricetbl .pn{align-self:center}
 .pricetbl .pn.ovr{color:var(--teal)}
 .cfg-note{color:var(--dim); font:11px var(--mono); margin-top:8px}
+
+/* collapsible tail of the models list */
+#mmore{overflow:hidden; max-height:0; transition:max-height .35s ease}
+#mmore.open{max-height:640px}
+#mmore .mrow{border-top:1px solid var(--line)}
+.morebtn{appearance:none; border:0; background:transparent; color:var(--dim);
+  font:11.5px var(--mono); cursor:pointer; padding:9px 6px 2px; text-align:left;
+  transition:color .15s}
+.morebtn:hover{color:var(--teal)}
 </style>
 </head>
 <body>
@@ -1910,12 +1919,16 @@ function setHeatCell(c, v, i, j, hmax, peak){
   c._tip = WD[i] + " " + String(j).padStart(2,"0") + ":00 · <b>" + money(v) + "</b>";
 }
 
+let modelsOpen = false;
 function renderModels(d, fresh){
   const mmax = Math.max(...d.models.map(m => m.cost), 0.01);
   if (fresh){
     const box = $("models");
     box.replaceChildren();
     R.models = [];
+    const more = document.createElement("div");
+    more.id = "mmore";
+    more.classList.toggle("open", modelsOpen);
     d.models.forEach((m, i) => {
       const r = document.createElement("div");
       r.className = "mrow";
@@ -1923,9 +1936,24 @@ function renderModels(d, fresh){
                     '<div class="tok"></div><div class="cost"></div>';
       r.children[0].textContent = m.name;
       stag(r, i, 40);
-      box.appendChild(r);
+      (i < 5 ? box : more).appendChild(r);   // top 5 visible, rest collapsible
       R.models.push(r);
     });
+    if (d.models.length > 5){
+      box.appendChild(more);
+      const btn = document.createElement("button");
+      btn.className = "morebtn";
+      const label = () => modelsOpen
+        ? "− collapse"
+        : "+ " + (d.models.length - 5) + " more models";
+      btn.textContent = label();
+      btn.onclick = () => {
+        modelsOpen = !modelsOpen;
+        more.classList.toggle("open", modelsOpen);
+        btn.textContent = label();
+      };
+      box.appendChild(btn);
+    }
   }
   d.models.forEach((m, i) => {
     const r = R.models[i]; if (!r) return;
