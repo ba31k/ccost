@@ -68,9 +68,12 @@ or the `CCOST_ROOT`/`CCOST_CODEX_ROOT` environment variables.
 
 `ccost.app` is a native shell: full-height window (the dashboard header is
 the titlebar, drag it to move, double-click to zoom), Dock icon, Cmd+Q/W/R,
-and an optional menu bar counter showing today's spend (the window can be
-closed while the counter keeps running). The bundled engine is a PyInstaller
-binary — no system Python required.
+and an optional menu bar counter (the window can be closed while the counter
+keeps running). The counter's menu configures it in place: pick the metrics
+it shows ($ today, $/hour, $ month, messages, tokens) and toggle
+**Launch at login** — started that way, the app stays in the menu bar and
+does not open the window. The bundled engine is a PyInstaller binary — no
+system Python required.
 
 ![macOS app with the menu bar counter](shots/desktop.png)
 

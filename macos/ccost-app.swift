@@ -3,9 +3,14 @@
 // stdout and shows the dashboard in a full-height WKWebView (header acts as
 // the titlebar). Build: sh build.sh (engine path via CCOST_ENGINE)
 import Cocoa
+import ServiceManagement
 import WebKit
 
 let BG = NSColor(srgbRed: 0.043, green: 0.055, blue: 0.071, alpha: 1.0)   // #0b0e12
+let METRICS: [(key: String, label: String)] = [
+    ("today", "$ today"), ("hour", "$ / hour"), ("month", "$ month"),
+    ("msgs", "messages"), ("tok", "tokens"),
+]
 
 final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler {
     var window: NSWindow!
@@ -15,6 +20,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
     var serverURL: String?
     var menubarOn = true
     var statusTimer: Timer?
+    var metricItems: [String: NSMenuItem] = [:]
+    var loginItem: NSMenuItem?
+    var metricsSel: [String] = ["today"]
 
     func applicationDidFinishLaunching(_ note: Notification) {
         let rect = NSRect(x: 0, y: 0, width: 1240, height: 860)
@@ -48,8 +56,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
         webView.autoresizingMask = [.width, .height]
         if #available(macOS 12.0, *) { webView.underPageBackgroundColor = BG }
         window.contentView = webView
-        window.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        // launched as a login item ('lgit' in the open event): stay in the
+        // menu bar only, the window is a click away
+        let ev = NSAppleEventManager.shared().currentAppleEvent
+        let atLogin = ev?.paramDescriptor(forKeyword: AEKeyword(0x7072_6474))?
+            .enumCodeValue == 0x6C67_6974
+        if !atLogin {
+            window.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+        }
 
         showSplash()
         launchServer()
@@ -164,7 +179,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
             }
             self.ensureStatusItem()
             self.statusItem?.button?.title = (st["title"] as? String) ?? "…"
+            self.metricsSel = (st["metrics"] as? [String]) ?? self.metricsSel
+            self.updateMenuState()
         }
+    }
+
+    func postConfig(_ body: [String: Any]) {
+        guard let base = serverURL, let u = URL(string: base + "config"),
+              let data = try? JSONSerialization.data(withJSONObject: body)
+        else { return }
+        var req = URLRequest(url: u)
+        req.httpMethod = "POST"
+        req.httpBody = data
+        URLSession.shared.dataTask(with: req) { [weak self] _, _, _ in
+            DispatchQueue.main.async { self?.refreshStatus() }
+        }.resume()
     }
 
     func ensureStatusItem() {
@@ -173,16 +202,76 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
         item.button?.font = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .semibold)
         item.button?.title = "…"
         let menu = NSMenu()
+        menu.autoenablesItems = false
         let open = NSMenuItem(title: "Open ccost",
                               action: #selector(openWindow(_:)), keyEquivalent: "")
         open.target = self
         menu.addItem(open)
+        menu.addItem(NSMenuItem.separator())
+        let header = NSMenuItem(title: "Show in the bar", action: nil, keyEquivalent: "")
+        header.isEnabled = false
+        menu.addItem(header)
+        for m in METRICS {
+            let mi = NSMenuItem(title: m.label,
+                                action: #selector(toggleMetric(_:)), keyEquivalent: "")
+            mi.target = self
+            mi.representedObject = m.key
+            mi.indentationLevel = 1
+            menu.addItem(mi)
+            metricItems[m.key] = mi
+        }
+        menu.addItem(NSMenuItem.separator())
+        let login = NSMenuItem(title: "Launch at login",
+                               action: #selector(toggleLogin(_:)), keyEquivalent: "")
+        login.target = self
+        menu.addItem(login)
+        loginItem = login
         menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "Quit",
                                 action: #selector(NSApplication.terminate(_:)),
                                 keyEquivalent: "q"))
         item.menu = menu
         statusItem = item
+        updateMenuState()
+    }
+
+    func updateMenuState() {
+        for (key, mi) in metricItems {
+            mi.state = metricsSel.contains(key) ? .on : .off
+        }
+        if #available(macOS 13.0, *) {
+            loginItem?.state = SMAppService.mainApp.status == .enabled ? .on : .off
+        } else {
+            loginItem?.isHidden = true
+        }
+    }
+
+    @objc func toggleMetric(_ sender: NSMenuItem) {
+        guard let key = sender.representedObject as? String else { return }
+        var sel = metricsSel
+        if let i = sel.firstIndex(of: key) {
+            sel.remove(at: i)
+        } else {
+            sel.append(key)
+        }
+        metricsSel = sel
+        updateMenuState()               // instant checkmark, server confirms after
+        postConfig(["menubar_metrics": sel])
+    }
+
+    @objc func toggleLogin(_ sender: NSMenuItem) {
+        guard #available(macOS 13.0, *) else { return }
+        let svc = SMAppService.mainApp
+        do {
+            if svc.status == .enabled {
+                try svc.unregister()
+            } else {
+                try svc.register()
+            }
+        } catch {
+            NSLog("login item: \(error.localizedDescription)")
+        }
+        updateMenuState()
     }
 
     @objc func openWindow(_ sender: Any?) {

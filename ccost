@@ -1176,7 +1176,8 @@ def statusbar_payload(co):
     picked = [m for m in MENUBAR_METRICS
               if m in CFG.get("menubar_metrics", ["today"])] or ["today"]
     return {"enabled": bool(CFG.get("menubar", True)),
-            "title": " · ".join(vals[m]() for m in picked)}
+            "title": " · ".join(vals[m]() for m in picked),
+            "metrics": picked}
 
 
 UPDATE = {"info": None}
