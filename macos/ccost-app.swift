@@ -134,7 +134,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
     // (config.menubar), polled together with the cost.
     func startStatusUpdates() {
         refreshStatus()
-        statusTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) {
+        statusTimer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) {
             [weak self] _ in self?.refreshStatus()
         }
     }
@@ -150,10 +150,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
     }
 
     func refreshStatus() {
-        fetchJSON("config") { [weak self] cfg in
+        // the engine picks the metrics (config.menubar_metrics) and formats
+        // the title; this side only displays it
+        fetchJSON("statusbar") { [weak self] st in
             guard let self = self else { return }
-            let conf = cfg["config"] as? [String: Any]
-            self.menubarOn = (conf?["menubar"] as? Bool) ?? true
+            self.menubarOn = (st["enabled"] as? Bool) ?? true
             if !self.menubarOn {
                 if let item = self.statusItem {
                     NSStatusBar.system.removeStatusItem(item)
@@ -162,16 +163,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
                 return
             }
             self.ensureStatusItem()
-            self.fetchJSON("data?period=1") { d in
-                guard let total = d["total"] as? [String: Any],
-                      let cost = total["cost"] as? Double else {
-                    self.statusItem?.button?.title = "$0"
-                    return
-                }
-                self.statusItem?.button?.title =
-                    cost >= 100 ? String(format: "$%.0f", cost)
-                                : String(format: "$%.2f", cost)
-            }
+            self.statusItem?.button?.title = (st["title"] as? String) ?? "…"
         }
     }
 

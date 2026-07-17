@@ -228,6 +228,8 @@ body.chrome-win #drawer{top:30px}
 .srcinfo div:first-child{font:600 13px var(--sans)}
 .dim2{color:var(--dim); font:11px var(--mono); margin-top:2px; word-break:break-all}
 .chips{display:flex; gap:6px; flex-wrap:wrap}
+/* menu bar metric picker: under its toggle, aligned with the label */
+.chips.mbm{margin:-2px 0 12px 46px}
 .chipbtn{appearance:none; border:1px solid var(--line); background:transparent;
   color:var(--dim); font:12px var(--mono); border-radius:6px; padding:4px 10px;
   cursor:pointer; transition:color .15s, border-color .15s}

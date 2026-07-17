@@ -681,6 +681,24 @@ function renderCfg(){
     info.append(n1);
     row.append(cb, tgl, info);
     body.appendChild(row);
+    if (key === "menubar" && c.menubar){
+      const sel = new Set(c.menubar_metrics || ["today"]);
+      const box = document.createElement("div");
+      box.className = "chips mbm";
+      for (const [label, val] of [["$ today","today"],["$/hour","hour"],
+                                  ["$ month","month"],["messages","msgs"],
+                                  ["tokens","tok"]]){
+        const b = document.createElement("button");
+        b.textContent = label;
+        b.className = "chipbtn" + (sel.has(val) ? " on" : "");
+        b.onclick = () => {
+          sel.has(val) ? sel.delete(val) : sel.add(val);
+          postCfg({menubar_metrics: [...sel]});
+        };
+        box.appendChild(b);
+      }
+      body.appendChild(box);
+    }
   }
   head("prices · $ per 1M tokens");
   const defaults = {};

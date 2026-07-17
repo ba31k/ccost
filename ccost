@@ -78,7 +78,8 @@ VERSION = "1.4.2"
 DEFAULT_CFG = {"sources": {"claude": True, "codex": True},
                "claude_root": None, "codex_root": None,
                "refresh_ms": 3000, "default_period": 0,
-               "menubar": True, "check_updates": True,
+               "menubar": True, "menubar_metrics": ["today"],
+               "check_updates": True,
                "prices": {}}     # price overrides: {model: [in, out(, cached)]}
 SOURCES = ("claude", "codex")
 
@@ -1144,6 +1145,40 @@ def _year_series(records):
     return out
 
 
+MENUBAR_METRICS = ("today", "hour", "month", "msgs", "tok")
+
+
+def statusbar_payload(co):
+    """Title for the macOS menu bar counter: metrics picked in settings."""
+    def money(v):
+        return f"${v:,.0f}" if v >= 100 else f"${v:.2f}"
+
+    def compact(n):
+        for div, suf in ((1e9, "B"), (1e6, "M"), (1e3, "k")):
+            if n >= div:
+                v = n / div
+                return (f"{v:.0f}" if v >= 100 else f"{v:.1f}") + suf
+        return str(int(n))
+
+    enabled = [r for r in co.records if CFG["sources"].get(r.src, True)]
+    day = [r for r in enabled if r.t >= cutoff(1)]
+    now = time.time()
+    vals = {
+        "today": lambda: money(sum(r.cost for r in day)),
+        "hour": lambda: money(sum(r.cost for r in enabled
+                                  if r.t >= now - 3600)) + "/h",
+        "month": lambda: money(sum(r.cost for r in enabled
+                                   if r.t >= cutoff(4))) + " mo",
+        "msgs": lambda: compact(len(day)) + " msg",
+        "tok": lambda: compact(sum(r.tin + r.tout + r.cw + r.cr
+                                   for r in day)) + " tok",
+    }
+    picked = [m for m in MENUBAR_METRICS
+              if m in CFG.get("menubar_metrics", ["today"])] or ["today"]
+    return {"enabled": bool(CFG.get("menubar", True)),
+            "title": " · ".join(vals[m]() for m in picked)}
+
+
 UPDATE = {"info": None}
 
 
@@ -1411,6 +1446,8 @@ body.chrome-win #drawer{top:30px}
 .srcinfo div:first-child{font:600 13px var(--sans)}
 .dim2{color:var(--dim); font:11px var(--mono); margin-top:2px; word-break:break-all}
 .chips{display:flex; gap:6px; flex-wrap:wrap}
+/* menu bar metric picker: under its toggle, aligned with the label */
+.chips.mbm{margin:-2px 0 12px 46px}
 .chipbtn{appearance:none; border:1px solid var(--line); background:transparent;
   color:var(--dim); font:12px var(--mono); border-radius:6px; padding:4px 10px;
   cursor:pointer; transition:color .15s, border-color .15s}
@@ -2216,6 +2253,24 @@ function renderCfg(){
     info.append(n1);
     row.append(cb, tgl, info);
     body.appendChild(row);
+    if (key === "menubar" && c.menubar){
+      const sel = new Set(c.menubar_metrics || ["today"]);
+      const box = document.createElement("div");
+      box.className = "chips mbm";
+      for (const [label, val] of [["$ today","today"],["$/hour","hour"],
+                                  ["$ month","month"],["messages","msgs"],
+                                  ["tokens","tok"]]){
+        const b = document.createElement("button");
+        b.textContent = label;
+        b.className = "chipbtn" + (sel.has(val) ? " on" : "");
+        b.onclick = () => {
+          sel.has(val) ? sel.delete(val) : sel.add(val);
+          postCfg({menubar_metrics: [...sel]});
+        };
+        box.appendChild(b);
+      }
+      body.appendChild(box);
+    }
   }
   head("prices · $ per 1M tokens");
   const defaults = {};
@@ -2423,6 +2478,17 @@ def _gui_server(co, port=0):
             elif u.path == "/config":
                 body = json.dumps(config_info(), ensure_ascii=False).encode("utf-8")
                 ctype = "application/json; charset=utf-8"
+            elif u.path == "/statusbar":
+                if not ready.is_set():
+                    st = {"enabled": bool(CFG.get("menubar", True)),
+                          "title": "…"}
+                else:
+                    with lock:
+                        if co.scan():
+                            cache.clear()
+                        st = statusbar_payload(co)
+                body = json.dumps(st).encode("utf-8")
+                ctype = "application/json; charset=utf-8"
             else:
                 self.send_response(404)
                 self.end_headers()
@@ -2452,6 +2518,10 @@ def _gui_server(co, port=0):
             for key in ("menubar", "check_updates"):
                 if isinstance(upd.get(key), bool):
                     CFG[key] = upd[key]
+            if isinstance(upd.get("menubar_metrics"), list):
+                CFG["menubar_metrics"] = [m for m in MENUBAR_METRICS
+                                          if m in upd["menubar_metrics"]] \
+                                         or ["today"]
             reprice = False
             if isinstance(upd.get("prices"), dict):
                 clean = {}

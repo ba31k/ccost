@@ -53,7 +53,9 @@ Settings (gear icon):
 
 - **sources** — Claude Code and Codex toggles, with paths and counts;
 - **refresh** — polling interval (2/5/10 s);
-- **default period**, **menu bar counter** (mac), **update checks**;
+- **default period**, **update checks**;
+- **menu bar counter** (mac) — pick what it shows: $ today, $/hour,
+  $ month, messages, tokens (any combination);
 - **prices** — edit any model's rates in place; the whole history is
   repriced instantly. Stored in `~/.ccost.json`.
 
