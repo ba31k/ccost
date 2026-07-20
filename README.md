@@ -57,12 +57,22 @@ Settings (gear icon):
 - **menu bar counter** (mac) — pick what it shows: $ today, $/hour,
   $ month, messages, tokens (any combination);
 - **prices** — edit any model's rates in place; the whole history is
-  repriced instantly. Stored in `~/.ccost.json`.
+  repriced instantly.
 
 ![settings](shots/settings.png)
 
+Config, the parsed-state snapshot and the webview profile all live in one
+folder, `~/.ccost/` (override with `CCOST_HOME`). Move it to a new machine
+and the whole history comes with it — no dependency on `~/.claude` or
+`~/.codex`. Older installs are migrated into it automatically.
+
 Data paths can be overridden via `claude_root`/`codex_root` in the config
 or the `CCOST_ROOT`/`CCOST_CODEX_ROOT` environment variables.
+
+Everything ccost keeps — config, the parsed-state snapshot, the window
+profile — lives in one folder, `~/.ccost/` (override with `CCOST_HOME`).
+Move that folder to a new machine and your whole history comes with it,
+with no dependency on `~/.claude` or `~/.codex`.
 
 ## macOS app
 
@@ -128,7 +138,7 @@ subscription actually charges (same numbers `/status` shows).
 ## Performance
 
 The full JSONL parse (gigabytes) happens once: parsed state is snapshotted
-to `~/.cache/ccost/state.pickle` and later runs start in a fraction of a
+to `~/.ccost/state.pickle` and later runs start in a fraction of a
 second, reading only newly appended bytes. Cold parses run across several
 processes. Prices are not part of the snapshot, so repricing never triggers
 a re-parse.

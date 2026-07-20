@@ -72,7 +72,37 @@ TS_FORMATS = ("%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ")
 
 # ---------------------------------------------------------------- config
 
-CONFIG_PATH = os.path.expanduser("~/.ccost.json")
+def ccost_home():
+    """One portable folder holding config, the parsed-state snapshot and the
+    webview profile. Move it to a new machine and history comes with it — no
+    dependency on ~/.claude or ~/.cache. Override with CCOST_HOME."""
+    d = os.environ.get("CCOST_HOME") or os.path.expanduser("~/.ccost")
+    try:
+        os.makedirs(d, exist_ok=True)
+    except OSError:
+        pass
+    return d
+
+
+def _migrate_home():
+    """Fold legacy locations (~/.ccost.json, ~/.cache/ccost) into ccost_home()
+    once, so upgrades keep their config and warm cache."""
+    home = ccost_home()
+    moves = [(os.path.expanduser("~/.ccost.json"),
+              os.path.join(home, "config.json")),
+             (os.path.join(os.path.expanduser("~"), ".cache", "ccost",
+                           "state.pickle"),
+              os.path.join(home, "state.pickle"))]
+    for old, new in moves:
+        if os.path.exists(old) and not os.path.exists(new):
+            try:
+                os.replace(old, new)
+            except OSError:
+                pass
+
+
+_migrate_home()
+CONFIG_PATH = os.path.join(ccost_home(), "config.json")
 VERSION = "1.4.2"
 
 DEFAULT_CFG = {"sources": {"claude": True, "codex": True},
@@ -260,12 +290,7 @@ class Collector:
 
     @staticmethod
     def _cache_path():
-        d = os.path.join(os.path.expanduser("~"), ".cache", "ccost")
-        try:
-            os.makedirs(d, exist_ok=True)
-        except OSError:
-            pass
-        return os.path.join(d, "state.pickle")
+        return os.path.join(ccost_home(), "state.pickle")
 
     def load_cache(self):
         import pickle
@@ -2559,7 +2584,7 @@ def serve_gui(co, port=0, open_browser=True, app_browser=None):
         # window mode: separate profile, otherwise chrome joins an existing
         # process and exits immediately — the window close cannot be tracked
         import subprocess
-        prof = os.path.join(os.path.expanduser("~"), ".cache", "ccost-webapp")
+        prof = os.path.join(ccost_home(), "webview")
         os.makedirs(prof, exist_ok=True)
         threading.Thread(target=srv.serve_forever, daemon=True).start()
         try:
